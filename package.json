@@ -1,0 +1,27 @@
+{
+  "name": "iron-district-ffa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "IRON DISTRICT — networked free-for-all FPS arena",
+  "scripts": {
+    "dev": "NODE_ENV=development node server.js",
+    "build": "next build",
+    "start": "NODE_ENV=production node server.js"
+  },
+  "dependencies": {
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "three": "0.167.1",
+    "three-mesh-bvh": "0.8.3",
+    "ws": "8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.7.5",
+    "@types/react": "18.3.11",
+    "@types/react-dom": "18.3.0",
+    "@types/three": "0.167.2",
+    "@types/ws": "8.5.12",
+    "typescript": "5.6.3"
+  }
+}
