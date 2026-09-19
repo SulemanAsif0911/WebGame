@@ -6,9 +6,9 @@ import type { GameSettings } from '@/game/settings';
 import SettingsPanel, { CrosshairSVG } from './SettingsPanel';
 
 const EMPTY: HudState = {
-  health: 100,
+  health: 150,
   mag: 30,
-  reserve: 90,
+  reserve: -1,
   reloading: false,
   ads: false,
   sprint: false,
@@ -32,6 +32,9 @@ const EMPTY: HudState = {
   headshot: false,
   adsBlend: 0,
   reloadProg: 0,
+  maxHealth: 150,
+  gunTune: false,
+  gunAlign: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
 };
 
 export default function GameView({
@@ -100,7 +103,7 @@ export default function GameView({
       <canvas
         ref={canvasRef}
         onClick={() => {
-          if (!paused && hud.alive) engineRef.current?.requestLock();
+          if (!paused && !hud.gunTune && hud.alive) engineRef.current?.requestLock();
         }}
       />
       <div className="hud">
@@ -137,7 +140,10 @@ export default function GameView({
         <div className="hp">
           <div className="hp-label">VITALS</div>
           <div className="hp-bar">
-            <div className="hp-fill" style={{ width: `${Math.max(0, hud.health)}%` }} />
+            <div
+            className="hp-fill"
+            style={{ width: `${Math.max(0, Math.min(100, (hud.health / Math.max(1, hud.maxHealth)) * 100))}%` }}
+          />
           </div>
           <div className="hp-num">{Math.max(0, Math.round(hud.health))}</div>
         </div>
@@ -200,6 +206,47 @@ export default function GameView({
             <div className="load-fill" style={{ width: `${Math.round(hud.load * 100)}%` }} />
           </div>
           <div className="kicker">{hud.loadMsg}</div>
+        </div>
+      )}
+
+      {hud.gunTune && !loading && (
+        <div className="gun-tune">
+          <div className="gun-tune-card">
+            <div className="kicker">BACKTICK · GUN ALIGN</div>
+            <h3>VIEWMODEL</h3>
+            <p className="help">Nudge the carbine on X / Y / Z. Rotation is extra if the barrel still sits wrong.</p>
+            {(
+              [
+                ['x', 'Offset X (left / right)', -0.45, 0.45, 0.002],
+                ['y', 'Offset Y (down / up)', -0.45, 0.45, 0.002],
+                ['z', 'Offset Z (back / forward)', -0.55, 0.55, 0.002],
+                ['rx', 'Rotate X (pitch)', -1.2, 1.2, 0.01],
+                ['ry', 'Rotate Y (yaw)', -1.2, 1.2, 0.01],
+                ['rz', 'Rotate Z (roll)', -1.2, 1.2, 0.01],
+              ] as const
+            ).map(([key, label, min, max, step]) => (
+              <div className="tune-row" key={key}>
+                <label>{label}</label>
+                <input
+                  type="range"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={hud.gunAlign[key]}
+                  onChange={(e) => engineRef.current?.setGunAlign({ [key]: Number(e.target.value) })}
+                />
+                <span>{hud.gunAlign[key].toFixed(3)}</span>
+              </div>
+            ))}
+            <div className="menu-actions" style={{ width: '100%', marginTop: 12 }}>
+              <button className="btn" onClick={() => engineRef.current?.resetGunAlign()}>
+                Reset
+              </button>
+              <button className="btn primary" onClick={() => engineRef.current?.toggleGunTune()}>
+                Close (` )
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

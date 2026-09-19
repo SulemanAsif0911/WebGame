@@ -8,17 +8,20 @@ import {
 } from 'three-mesh-bvh';
 import { GameAudio } from './audio';
 import type { GameSettings } from './settings';
-import { buildOperator, type OperatorRig } from './operator';
+import { buildOperator, mountOpponent, type OperatorRig } from './operator';
 import { GunMotion } from './motion';
+import { loadGunAlign, saveGunAlign, type GunAlign } from './gunAlign';
 
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const MAG_SIZE = 30;
-const RESERVE_MAX = 90;
-const RELOAD_TIME = 2.35;
-const FIRE_INTERVAL = 0.078;
+const RELOAD_TIME = 2.55;
+const FIRE_INTERVAL = 0.092;
+export const MAX_HP = 150;
+const BODY_DMG = 32;
+const HEAD_DMG = 80;
 const WALK = 5.05;
 const SPRINT = 8.35;
 const CROUCH_SPEED = 2.35;
@@ -67,6 +70,9 @@ export type HudState = {
   headshot: boolean;
   adsBlend: number;
   reloadProg: number;
+  maxHealth: number;
+  gunTune: boolean;
+  gunAlign: GunAlign;
 };
 
 export type EngineHooks = {
@@ -78,6 +84,7 @@ type RemoteVis = {
   id: number;
   root: THREE.Group;
   rig: OperatorRig;
+  mixer: THREE.AnimationMixer | null;
   x: number;
   y: number;
   z: number;
@@ -170,6 +177,13 @@ export class ArenaEngine {
   private lookBufY = 0;
   private gunPos = new THREE.Vector3();
   private gunRot = new THREE.Euler(0, 0, 0, 'YXZ');
+  private gunAlign: GunAlign = loadGunAlign();
+  private gunTune = false;
+  private hipHold = new THREE.Vector3(0, 0, 0);
+  private adsHold = new THREE.Vector3(-0.012, 0.028, 0.1);
+  private lastSpawn = -1;
+  private muzzleFlash: THREE.Mesh | null = null;
+  private recSide = 0;
   private charScale = 1;
   private charOffsetY = 0;
   private arenaCenter = new THREE.Vector3();
@@ -192,9 +206,9 @@ export class ArenaEngine {
   private crouch = false;
   private ads = false;
   private sprinting = false;
-  private health = 100;
+  private health = MAX_HP;
   private mag = MAG_SIZE;
-  private reserve = RESERVE_MAX;
+  private reserve = -1;
   private reloading = false;
   private reloadT = 0;
   private fireCd = 0;
@@ -411,7 +425,7 @@ export class ArenaEngine {
   private onLock() {
     this.locked = document.pointerLockElement === this.canvas;
     if (this.locked) this.everLocked = true;
-    if (!this.locked && this.everLocked && this.alive && !this.paused) {
+    if (!this.locked && this.everLocked && this.alive && !this.paused && !this.gunTune) {
       this.paused = true;
       this.hooks.onPause(true);
     }
@@ -470,8 +484,13 @@ export class ArenaEngine {
       }
       return;
     }
+    if (e.code === 'Backquote') {
+      e.preventDefault();
+      this.toggleGunTune();
+      return;
+    }
     this.keys.add(e.code);
-    if (this.paused) return;
+    if (this.paused || this.gunTune) return;
     if (this.isBound('reload', e.code)) this.startReload();
   }
 
@@ -481,11 +500,11 @@ export class ArenaEngine {
 
   private onMouseDown(e: MouseEvent) {
     this.mouseDown.add(e.button);
-    if (!this.locked && !this.paused && this.alive) {
+    if (!this.locked && !this.paused && !this.gunTune && this.alive) {
       this.requestLock();
       return;
     }
-    if (this.paused) return;
+    if (this.paused || this.gunTune) return;
     if (this.isBound('fire', 'Mouse' + e.button)) this.tryFire();
   }
 
@@ -494,10 +513,11 @@ export class ArenaEngine {
   }
 
   private onMouseMove(e: MouseEvent) {
-    if (!this.locked || this.paused || !this.alive) return;
-    this.lookBufX += e.movementX;
-    this.lookBufY += e.movementY;
-    this.sway += e.movementX * 0.00018;
+    if (!this.locked || this.paused || this.gunTune || !this.alive) return;
+    const mx = THREE.MathUtils.clamp(e.movementX, -90, 90);
+    const my = THREE.MathUtils.clamp(e.movementY, -90, 90);
+    this.lookBufX += mx;
+    this.lookBufY += my;
   }
 
   private async boot() {
@@ -629,6 +649,19 @@ export class ArenaEngine {
     if (this.clipNode) this.clipHome.copy(this.clipNode.position);
     if (this.boltNode) this.boltHome.copy(this.boltNode.position);
 
+    const flashGeo = new THREE.PlaneGeometry(0.08, 0.08);
+    const flashMat = new THREE.MeshBasicMaterial({
+      color: 0xffe6a8,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
+    this.muzzleFlash.position.set(0.02, -0.02, -0.42);
+    this.muzzleFlash.visible = false;
+    this.localRoot.add(this.muzzleFlash);
+
     this.localMixer = new THREE.AnimationMixer(src);
     const namedIdle = clips.find((cl) => /idle01|idle/i.test(cl.name) && !/all/i.test(cl.name));
     const namedFire = clips.find((cl) => /@fire|fire/i.test(cl.name) && !/all/i.test(cl.name));
@@ -684,7 +717,7 @@ export class ArenaEngine {
     return this.mapBox.min.y;
   }
 
-  private placeAtSafeSpawn(index = Math.floor(Math.random() * 10)) {
+  private placeAtSafeSpawn(_index?: number) {
     const c = this.mapBox.getCenter(new THREE.Vector3());
     const ring = [
       [16, 14],
@@ -697,14 +730,23 @@ export class ArenaEngine {
       [-19, 5],
       [9, -7],
       [-11, 8],
+      [18, -8],
+      [-8, 18],
+      [6, -18],
+      [-18, -6],
     ];
-    const [dx, dz] = ring[index % ring.length];
+    let index = Math.floor(Math.random() * ring.length);
+    if (index === this.lastSpawn) index = (index + 1 + Math.floor(Math.random() * (ring.length - 1))) % ring.length;
+    this.lastSpawn = index;
+    const [baseX, baseZ] = ring[index];
+    const dx = baseX + (Math.random() * 4 - 2);
+    const dz = baseZ + (Math.random() * 4 - 2);
     const x = c.x + dx;
     const z = c.z + dz;
     const y = this.groundAt(x, z, this.mapBox.max.y + 8) + 0.05;
     this.pos.set(x, y, z);
     this.vel.set(0, 0, 0);
-    this.yaw = Math.atan2(c.x - x, c.z - z);
+    this.yaw = Math.atan2(c.x - x, c.z - z) + (Math.random() * 0.6 - 0.3);
   }
 
   private connect() {
@@ -746,11 +788,11 @@ export class ArenaEngine {
     if (msg.t === 'welcome') {
       this.myId = msg.id;
       if (msg.name) this.myName = msg.name;
-      this.health = msg.you?.hp ?? msg.you?.health ?? 100;
+      this.health = msg.you?.hp ?? msg.you?.health ?? MAX_HP;
       this.alive = msg.you?.alive !== false;
       this.kills = msg.you?.kills || 0;
       this.deaths = msg.you?.deaths || 0;
-      this.placeAtSafeSpawn(msg.id || 0);
+      this.placeAtSafeSpawn();
       const others = msg.players || [];
       for (const p of others) this.spawnRemote(p);
       return;
@@ -866,16 +908,16 @@ export class ArenaEngine {
       const id = msg.id;
       if (id === this.myId) {
         this.alive = true;
-        this.health = msg.hp ?? 100;
+        this.health = msg.hp ?? MAX_HP;
         this.killedBy = null;
         this.invuln = 0.4;
-        this.placeAtSafeSpawn(id);
+        this.placeAtSafeSpawn();
         this.mag = MAG_SIZE;
       } else {
         const r = this.remotes.get(id);
         if (r) {
           r.alive = true;
-          r.health = 100;
+          r.health = MAX_HP;
           r.root.visible = true;
           const w = this.decodePos(msg.x || 0, msg.z || 0);
           r.tx = w.x;
@@ -887,7 +929,7 @@ export class ArenaEngine {
       const s = this.scores.get(id);
       if (s) {
         s.alive = true;
-        s.health = 100;
+        s.health = MAX_HP;
       }
       return;
     }
@@ -956,7 +998,21 @@ export class ArenaEngine {
       if (p.name) r.rig.setName(p.name);
       return;
     }
-    const rig = buildOperator(p.name || 'Operator', 0xd6ff3a);
+    let rig: OperatorRig;
+    let mixer: THREE.AnimationMixer | null = null;
+    if (this.template) {
+      const clone = SkeletonUtils.clone(this.template) as THREE.Object3D;
+      rig = mountOpponent(clone, p.name || 'Operator', this.charScale, this.charOffsetY);
+      if (this.clip) {
+        mixer = new THREE.AnimationMixer(clone);
+        const pose = mixer.clipAction(this.clip);
+        pose.paused = true;
+        pose.time = 0.02;
+        pose.play();
+      }
+    } else {
+      rig = buildOperator(p.name || 'Operator', 0xd6ff3a);
+    }
     rig.hitMeshes.forEach((m) => {
       m.userData.pid = p.id;
     });
@@ -971,6 +1027,7 @@ export class ArenaEngine {
       id: p.id,
       root,
       rig,
+      mixer,
       x: px,
       y,
       z: pz,
@@ -982,7 +1039,7 @@ export class ArenaEngine {
       tyaw: p.yaw || 0,
       tpitch: p.pitch || 0,
       alive: p.alive !== false,
-      health: p.hp ?? p.health ?? 100,
+      health: p.hp ?? p.health ?? MAX_HP,
     };
     root.position.set(r.x, r.y, r.z);
     root.visible = r.alive;
@@ -1024,7 +1081,7 @@ export class ArenaEngine {
   }
 
   private startReload() {
-    if (!this.alive || this.reloading || this.mag === MAG_SIZE || this.reserve <= 0) return;
+    if (!this.alive || this.reloading || this.mag === MAG_SIZE) return;
     this.reloading = true;
     this.reloadT = RELOAD_TIME;
     this.ads = false;
@@ -1044,41 +1101,51 @@ export class ArenaEngine {
     if (this.clipNode) {
       if (p <= 0) {
         this.clipNode.position.copy(this.clipHome);
+        this.clipNode.rotation.set(0, 0, 0);
         this.clipNode.visible = true;
-      } else if (p < 0.28) {
-        const u = p / 0.28;
+      } else if (p < 0.12) {
+        const u = p / 0.12;
         this.clipNode.position.copy(this.clipHome);
-        this.clipNode.position.y -= u * 0.22;
-        this.clipNode.rotation.x = u * 0.8;
-      } else if (p < 0.42) {
+        this.clipNode.position.y -= u * 0.04;
+        this.clipNode.rotation.z = u * 0.15;
+        this.clipNode.visible = true;
+      } else if (p < 0.34) {
+        const u = (p - 0.12) / 0.22;
+        const grav = u * u;
+        this.clipNode.visible = true;
+        this.clipNode.position.copy(this.clipHome);
+        this.clipNode.position.y -= 0.04 + grav * 0.55;
+        this.clipNode.position.x += u * 0.08;
+        this.clipNode.rotation.x = u * 1.6;
+        this.clipNode.rotation.z = 0.15 + u * 1.2;
+      } else if (p < 0.48) {
         this.clipNode.visible = false;
-      } else if (p < 0.62) {
-        const u = (p - 0.42) / 0.2;
+        this.clipNode.position.copy(this.clipHome);
+      } else if (p < 0.7) {
+        const u = (p - 0.48) / 0.22;
         this.clipNode.visible = true;
         this.clipNode.position.copy(this.clipHome);
-        this.clipNode.position.y -= (1 - u) * 0.22;
-        this.clipNode.rotation.x = (1 - u) * 0.6;
+        this.clipNode.position.y -= (1 - u) * (1 - u) * 0.28;
+        this.clipNode.rotation.x = (1 - u) * 0.7;
+        this.clipNode.rotation.z = (1 - u) * 0.2;
       } else {
         this.clipNode.visible = true;
         this.clipNode.position.copy(this.clipHome);
-        this.clipNode.rotation.x = 0;
+        this.clipNode.rotation.set(0, 0, 0);
       }
     }
     if (this.boltNode) {
       this.boltNode.position.copy(this.boltHome);
-      if (p > 0.68 && p < 0.9) {
-        const u = (p - 0.68) / 0.22;
+      if (p > 0.72 && p < 0.9) {
+        const u = (p - 0.72) / 0.18;
         const kick = Math.sin(u * Math.PI);
-        this.boltNode.position.z += kick * 0.09;
+        this.boltNode.position.z += kick * 0.11;
       }
     }
   }
 
   private finishReload() {
-    const need = MAG_SIZE - this.mag;
-    const take = Math.min(need, this.reserve);
-    this.mag += take;
-    this.reserve -= take;
+    this.mag = MAG_SIZE;
     this.reloading = false;
     this.reloadT = 0;
     this.gunMotion.reloading = false;
@@ -1100,11 +1167,20 @@ export class ArenaEngine {
     }
     this.mag -= 1;
     this.fireCd = FIRE_INTERVAL;
-    const adsKick = THREE.MathUtils.lerp(1, 0.38, this.adsBlend);
-    this.recoil += 0.02 * adsKick;
-    this.pitch += 0.008 * adsKick;
+    const adsKick = THREE.MathUtils.lerp(1, 0.34, this.adsBlend);
+    const climb = 0.018 * adsKick + Math.random() * 0.006 * adsKick;
+    this.recSide = THREE.MathUtils.clamp(this.recSide + (Math.random() - 0.42) * 0.01 * adsKick, -0.035, 0.035);
+    this.recoil = Math.min(0.22, this.recoil + 0.055 * adsKick);
+    this.pitch = Math.min(1.25, this.pitch + climb);
+    this.yaw -= this.recSide * 0.55;
     this.audio.gunshot(0);
-    this.muzzleLight.intensity = 18;
+    this.muzzleLight.intensity = 28;
+    if (this.muzzleFlash) {
+      this.muzzleFlash.visible = true;
+      (this.muzzleFlash.material as THREE.MeshBasicMaterial).opacity = 0.95;
+      this.muzzleFlash.rotation.z = Math.random() * Math.PI;
+      this.muzzleFlash.scale.setScalar(0.7 + Math.random() * 0.8);
+    }
     if (this.fpvFire) {
       this.fpvIdle?.fadeOut(0.04);
       this.fpvFire.reset();
@@ -1114,6 +1190,10 @@ export class ArenaEngine {
     const origin = this.camera.position.clone();
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
+    const spread = THREE.MathUtils.lerp(0.018, 0.0022, this.smooth01(this.adsBlend));
+    dir.x += (Math.random() - 0.5) * spread;
+    dir.y += (Math.random() - 0.5) * spread * 0.7;
+    dir.z += (Math.random() - 0.5) * spread;
     dir.normalize();
     this.spawnTracer(origin, dir);
 
@@ -1163,7 +1243,7 @@ export class ArenaEngine {
     if (target != null) {
       const r = this.remotes.get(target);
       if (r) {
-        const dmg = head ? 100 : 50;
+        const dmg = head ? HEAD_DMG : BODY_DMG;
         r.health = Math.max(0, r.health - dmg);
         this.hitmarker = 1;
         this.headshotFx = head;
@@ -1175,7 +1255,7 @@ export class ArenaEngine {
       }
     }
 
-    this.gunMotion.kick();
+    this.gunMotion.kick(this.adsBlend);
 
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(
@@ -1194,7 +1274,7 @@ export class ArenaEngine {
           JSON.stringify({
             t: 'hit',
             target,
-            dmg: head ? 100 : 50,
+            dmg: head ? HEAD_DMG : BODY_DMG,
             head,
           })
         );
@@ -1238,16 +1318,22 @@ export class ArenaEngine {
     this.ammoFlash = Math.max(0, this.ammoFlash - dt * 2);
     this.invuln = Math.max(0, this.invuln - dt);
     this.fireCd = Math.max(0, this.fireCd - dt);
-    this.recoil = THREE.MathUtils.lerp(this.recoil, 0, 1 - Math.pow(0.001, dt));
-    this.sway = THREE.MathUtils.lerp(this.sway, 0, 1 - Math.pow(0.02, dt));
-    this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt * 90);
+    this.recoil = THREE.MathUtils.lerp(this.recoil, 0, 1 - Math.pow(0.0004, dt));
+    this.recSide = THREE.MathUtils.lerp(this.recSide, 0, 1 - Math.pow(0.02, dt));
+    this.sway = THREE.MathUtils.lerp(this.sway, 0, 1 - Math.pow(0.0008, dt));
+    this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt * 110);
+    if (this.muzzleFlash) {
+      const mat = this.muzzleFlash.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.max(0, mat.opacity - dt * 14);
+      if (mat.opacity <= 0.02) this.muzzleFlash.visible = false;
+    }
 
     if (this.reloading) {
       this.reloadT -= dt;
       if (this.reloadT <= 0) this.finishReload();
     }
 
-    this.ads = this.alive && !this.paused && this.held('ads') && !this.reloading;
+    this.ads = this.alive && !this.paused && !this.gunTune && this.held('ads') && !this.reloading;
     this.applyLook(dt);
     this.stepAds(dt);
     const adsT = this.smooth01(this.adsBlend);
@@ -1259,7 +1345,7 @@ export class ArenaEngine {
     if (this.alive && !this.paused) this.move(dt);
     else this.vel.y = 0;
 
-    if (this.held('fire') && this.locked && this.alive && !this.paused) this.tryFire();
+    if (this.held('fire') && this.locked && this.alive && !this.paused && !this.gunTune) this.tryFire();
 
     this.localMixer?.update(dt);
     this.gunMotion.setWalk(this.grounded && (this.vel.length() > 0.4) ? 1 : 0);
@@ -1400,24 +1486,24 @@ export class ArenaEngine {
     }
   }
 
-  private applyLook(dt: number) {
-    if (!this.locked || this.paused || !this.alive) {
+  private applyLook(_dt: number) {
+    if (!this.locked || this.paused || this.gunTune || !this.alive) {
       this.lookBufX = 0;
       this.lookBufY = 0;
       return;
     }
     const adsT = this.smooth01(this.adsBlend);
-    const adsMul = THREE.MathUtils.lerp(1, this.settings.adsSensitivity * 0.42, adsT);
-    const consume = 1 - Math.pow(0.00025, dt);
-    const mx = this.lookBufX * consume;
-    const my = this.lookBufY * consume;
-    this.lookBufX -= mx;
-    this.lookBufY -= my;
-    const sens = 0.00162 * this.settings.sensitivity * adsMul;
+    const adsMul = THREE.MathUtils.lerp(1, this.settings.adsSensitivity * 0.45, adsT);
+    const mx = this.lookBufX;
+    const my = this.lookBufY;
+    this.lookBufX = 0;
+    this.lookBufY = 0;
+    const sens = 0.00205 * this.settings.sensitivity * adsMul;
     this.yaw -= mx * sens;
     const inv = this.settings.invertY ? -1 : 1;
     this.pitch -= my * sens * inv;
     this.gunMotion.sway(mx, my);
+    this.sway = THREE.MathUtils.clamp(this.sway + mx * 0.00008, -0.08, 0.08);
     this.pitch = Math.max(-1.25, Math.min(1.25, this.pitch));
   }
 
@@ -1449,53 +1535,38 @@ export class ArenaEngine {
     const adsT = this.smooth01(this.adsBlend);
     const eye = this.crouch ? CROUCH_EYE : STAND_EYE;
     const bobAmt = (this.grounded ? 1 : 0) * (1 - adsT * 0.92);
-    const bobX = Math.sin(this.bob) * 0.018 * bobAmt;
-    const bobY = Math.abs(Math.cos(this.bob)) * 0.022 * bobAmt;
-    const rec = THREE.MathUtils.lerp(1, 0.28, adsT);
+    const bobX = Math.sin(this.bob) * 0.014 * bobAmt;
+    const bobY = Math.abs(Math.cos(this.bob)) * 0.016 * bobAmt;
+    const rec = THREE.MathUtils.lerp(1, 0.32, adsT);
+    const roll = THREE.MathUtils.clamp(-this.sway * THREE.MathUtils.lerp(0.22, 0.04, adsT), -0.06, 0.06);
     this.camera.position.set(
       this.pos.x + bobX,
-      this.pos.y + eye + bobY - this.recoil * 0.1 * rec,
+      this.pos.y + eye + bobY - this.recoil * 0.08 * rec,
       this.pos.z
     );
-    this.camera.rotation.set(
-      this.pitch - this.recoil * 0.48 * rec,
-      this.yaw,
-      -this.sway * THREE.MathUtils.lerp(0.32, 0.05, adsT),
-      'YXZ'
-    );
+    this.camera.rotation.set(this.pitch - this.recoil * 0.42 * rec, this.yaw, roll, 'YXZ');
     this.camera.updateMatrixWorld(true);
 
-    const hip = new THREE.Vector3(this.sway * 0.35, bobY * 0.55, 0);
-    const hipRotX = -this.recoil * 0.22;
-    const hipRotY = this.sway * 0.12;
-    const hipRotZ = -this.sway * 0.18;
-
-    this.localRoot.position.copy(hip);
-    this.localRoot.rotation.set(hipRotX, hipRotY, hipRotZ);
-    this.localRoot.updateMatrixWorld(true);
-
-    const adsPos = hip.clone();
-    let adsRotX = -this.recoil * 0.06;
-    let adsRotY = 0;
-    let adsRotZ = 0;
-    if (this.lensObj) {
-      this.lensObj.getWorldPosition(this.tmp);
-      this.camera.worldToLocal(this.tmp);
-      adsPos.x += -this.tmp.x;
-      adsPos.y += -this.tmp.y;
-      adsPos.z += -0.032 - this.tmp.z;
-    } else {
-      adsPos.set(-0.01, 0.035, 0.09);
-    }
-
+    const a = this.gunAlign;
+    const hip = new THREE.Vector3(
+      this.hipHold.x + this.sway * 0.22 + a.x,
+      this.hipHold.y + bobY * 0.4 + a.y,
+      this.hipHold.z + a.z
+    );
+    const adsPos = new THREE.Vector3(this.adsHold.x + a.x * 0.25, this.adsHold.y + a.y * 0.25, this.adsHold.z + a.z * 0.2);
     const desired = hip.clone().lerp(adsPos, adsT);
-    const follow = 1 - Math.pow(0.00002, dt);
+    const follow = this.gunTune ? 1 : 1 - Math.pow(0.0008, dt);
     this.gunPos.lerp(desired, follow);
+
+    const hipRotX = -this.recoil * 0.28 + a.rx;
+    const hipRotY = this.sway * 0.08 + a.ry;
+    const hipRotZ = -this.sway * 0.12 + a.rz;
+    const adsRotX = -this.recoil * 0.08 + a.rx * 0.2;
     this.localRoot.position.copy(this.gunPos).add(this.gunMotion.off);
     this.localRoot.rotation.set(
       THREE.MathUtils.lerp(hipRotX, adsRotX, adsT) + this.gunMotion.rot.x,
-      THREE.MathUtils.lerp(hipRotY, adsRotY, adsT) + this.gunMotion.rot.y,
-      THREE.MathUtils.lerp(hipRotZ, adsRotZ, adsT) + this.gunMotion.rot.z
+      THREE.MathUtils.lerp(hipRotY, a.ry * 0.2, adsT) + this.gunMotion.rot.y,
+      THREE.MathUtils.lerp(hipRotZ, a.rz * 0.15, adsT) + this.gunMotion.rot.z
     );
 
     const hideLens = adsT > 0.62;
@@ -1512,13 +1583,14 @@ export class ArenaEngine {
       r.y = THREE.MathUtils.lerp(r.y, r.ty, 1 - Math.pow(0.0008, dt));
       r.z = THREE.MathUtils.lerp(r.z, r.tz, 1 - Math.pow(0.0008, dt));
       r.yaw = THREE.MathUtils.lerp(r.yaw, r.tyaw, 1 - Math.pow(0.0005, dt));
+      r.mixer?.update(dt);
       r.root.position.set(r.x, r.y, r.z);
       r.root.rotation.y = r.yaw + Math.PI;
       r.root.visible = r.alive;
       r.rig.nameSpr.quaternion.copy(this.camera.quaternion);
       const hpParent = r.rig.hpFill.parent;
       if (hpParent) hpParent.quaternion.copy(this.camera.quaternion);
-      const hp = Math.max(0, Math.min(1, r.health / 100));
+      const hp = Math.max(0, Math.min(1, r.health / MAX_HP));
       r.rig.hpFill.scale.x = Math.max(0.04, hp);
       r.rig.hpFill.position.x = -0.42 * (1 - hp);
       (r.rig.hpFill.material as THREE.MeshBasicMaterial).color.setHex(
@@ -1623,7 +1695,33 @@ export class ArenaEngine {
       headshot: this.headshotFx,
       adsBlend: this.adsBlend,
       reloadProg: this.reloading ? 1 - this.reloadT / RELOAD_TIME : 0,
+      maxHealth: MAX_HP,
+      gunTune: this.gunTune,
+      gunAlign: { ...this.gunAlign },
     });
+  }
+
+  toggleGunTune() {
+    this.gunTune = !this.gunTune;
+    if (this.gunTune) {
+      document.exitPointerLock?.();
+    } else {
+      saveGunAlign(this.gunAlign);
+      this.requestLock();
+    }
+    this.pushHud(true);
+  }
+
+  setGunAlign(partial: Partial<GunAlign>) {
+    this.gunAlign = { ...this.gunAlign, ...partial };
+    saveGunAlign(this.gunAlign);
+    this.pushHud(true);
+  }
+
+  resetGunAlign() {
+    this.gunAlign = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
+    saveGunAlign(this.gunAlign);
+    this.pushHud(true);
   }
 
   dispose() {

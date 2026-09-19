@@ -44,10 +44,11 @@ If Windows asks about Node.js firewall access, allow it on **private networks**.
 | Fire | LMB |
 | ADS | RMB |
 | Reload | R |
+| Gun align | ` |
 | Scoreboard | Tab |
 | Pause | Esc |
 
-Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), 30-round mag, hitscan. Hold ADS to look through the sight with zoom. **R** plays a staged mag-drop / slam / bolt-slap reload. Headshots are lethal. There are **no bots** — every operator who deploys on this server is in the same FFA. Other players are always-visible operators with nametags and HP bars. An invisible circular wall keeps everyone inside the arena.
+Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), **30-round mag with infinite reserve**. Hold ADS to look through the sight. **R** plays a mag-drop / seat / bolt reload. **` ** (backtick) opens live gun X/Y/Z alignment. Operators have 150 HP. There are **no bots** — every Deploy joins this FFA. Other players use `opponent.glb`. An invisible circular wall keeps everyone inside the arena. Respawn picks a new ring point each time.
 
 ## Credits
 

@@ -30,9 +30,9 @@ const handle = app.getRequestHandler();
 
 const TICK_MS = 66;
 const MAX_PLAYERS = 16;
-const MAX_HP = 100;
-const BODY_DMG = 50;
-const HEAD_DMG = 100;
+const MAX_HP = 150;
+const BODY_DMG = 32;
+const HEAD_DMG = 80;
 const RESPAWN_MS = 2800;
 const SHOT_WINDOW_MS = 1000;
 const SHOT_LIMIT = 28;
@@ -48,6 +48,10 @@ const SPAWNS = [
   [-19, 5],
   [9, -7],
   [-11, 8],
+  [18, -8],
+  [-8, 18],
+  [6, -18],
+  [-18, -6],
 ];
 
 let nextId = 1;
@@ -79,22 +83,29 @@ function uniqueName(base) {
   return `${root}-${Date.now() % 1000}`;
 }
 
-function pickSpawn() {
-  let best = SPAWNS[0];
+function pickSpawn(exceptId) {
+  const order = SPAWNS.slice();
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+  }
+  let best = order[0];
   let bestScore = -1;
-  for (const s of SPAWNS) {
+  for (const s of order) {
     let minD = 999;
     for (const q of players.values()) {
-      if (!q.alive) continue;
+      if (!q.alive || q.id === exceptId) continue;
       minD = Math.min(minD, Math.hypot(q.x - s[0], q.z - s[1]));
     }
-    const score = minD + Math.random() * 4;
+    const score = minD + Math.random() * 18;
     if (score > bestScore) {
       bestScore = score;
       best = s;
     }
   }
-  return [best[0] + (Math.random() * 2 - 1), best[1] + (Math.random() * 2 - 1)];
+  return [best[0] + (Math.random() * 5 - 2.5), best[1] + (Math.random() * 5 - 2.5)];
 }
 
 function meta(p) {
@@ -166,7 +177,7 @@ function applyDamage(victim, dmg, from, head) {
   if (victim.respawnTimer) clearTimeout(victim.respawnTimer);
   victim.respawnTimer = setTimeout(() => {
     if (!players.has(victim.id)) return;
-    const spawn = pickSpawn();
+    const spawn = pickSpawn(victim.id);
     victim.x = spawn[0];
     victim.y = 0;
     victim.z = spawn[1];

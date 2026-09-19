@@ -400,6 +400,43 @@ a { color: var(--accent); }
   justify-content: center;
   pointer-events: auto;
 }
+.gun-tune {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 28px;
+  background: linear-gradient(90deg, transparent 40%, rgba(5,6,8,0.55) 100%);
+}
+.gun-tune-card {
+  width: min(380px, 92vw);
+  background: var(--panel);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: var(--shadow);
+  padding: 18px 20px 16px;
+}
+.gun-tune-card h3 {
+  font-family: var(--display);
+  font-size: 36px;
+  margin: 4px 0 8px;
+  letter-spacing: 0.06em;
+}
+.tune-row {
+  display: grid;
+  grid-template-columns: 1fr 140px 52px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.tune-row input[type="range"] { accent-color: var(--accent); width: 100%; }
+.tune-row span { font-family: var(--mono); color: var(--text); text-align: right; }
 .xhair-preview {
   width: 160px;
   height: 160px;
