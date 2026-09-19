@@ -9,6 +9,8 @@ Uses the repository models:
 
 ## Launch
 
+Works on Windows PowerShell, macOS, and Linux (no Unix-only `NODE_ENV=` prefix).
+
 ```bash
 npm install
 npm run build
@@ -19,10 +21,12 @@ Development, bound to a LAN address:
 
 ```bash
 npm install
-npm run dev -- -H 10.0.0.15 -p 3000
+npm run dev -- -H 192.168.18.15 -p 3000
 ```
 
 Default bind is `0.0.0.0:3000` so other machines on the network can connect. Open `http://<host-ip>:3000`.
+
+If Windows asks about Node.js firewall access, allow it on **private networks**.
 
 ## Play
 

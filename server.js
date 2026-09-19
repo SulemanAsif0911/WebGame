@@ -1,5 +1,10 @@
 'use strict';
 
+const devFlag = process.argv.includes('--dev');
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = devFlag ? 'development' : 'production';
+}
+
 const { createServer } = require('http');
 const { parse } = require('url');
 const next = require('next');

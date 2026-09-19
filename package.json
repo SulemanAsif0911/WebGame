@@ -4,9 +4,9 @@
   "private": true,
   "description": "IRON DISTRICT — networked free-for-all FPS arena",
   "scripts": {
-    "dev": "NODE_ENV=development node server.js",
+    "dev": "node server.js --dev",
     "build": "next build",
-    "start": "NODE_ENV=production node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "next": "14.2.15",
