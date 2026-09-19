@@ -110,6 +110,21 @@ a { color: var(--accent); }
   outline: none;
 }
 .callsign input:focus { border-color: var(--accent); }
+.mode-pick { margin: 0 0 18px; max-width: 420px; }
+.mode-row { display: flex; gap: 8px; margin-top: 8px; }
+.mode-btn {
+  flex: 1;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.03);
+  color: var(--muted);
+  padding: 10px 8px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.mode-btn.on { color: #111; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.mode-btn:disabled:not(.on) { opacity: 0.4; cursor: not-allowed; }
+.mode-btn:disabled.on { cursor: default; }
 
 .menu-actions { display: flex; flex-direction: column; gap: 10px; width: 280px; }
 .btn {

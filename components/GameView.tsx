@@ -35,6 +35,8 @@ const EMPTY: HudState = {
   maxHealth: 150,
   gunTune: false,
   gunAlign: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
+  sky: 'day',
+  host: false,
 };
 
 export default function GameView({
@@ -42,11 +44,13 @@ export default function GameView({
   settings,
   onSettings,
   onLeave,
+  sky = 'day',
 }: {
   name: string;
   settings: GameSettings;
   onSettings: (s: GameSettings) => void;
   onLeave: () => void;
+  sky?: 'day' | 'night';
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<ArenaEngine | null>(null);
@@ -66,7 +70,7 @@ export default function GameView({
         setPaused(p);
         if (!p) setShowSettings(false);
       },
-    });
+    }, { sky });
     engineRef.current = engine;
     return () => {
       engine.dispose();
@@ -124,7 +128,7 @@ export default function GameView({
           }}
         />
         <div className="top-left">
-          IRON DISTRICT FFA
+          IRON DISTRICT · {hud.sky === 'night' ? 'NIGHT' : 'DAY'} FFA
           <br />
           {hud.connected ? `LINK ${hud.ping}ms` : hud.connecting ? 'LINKING…' : 'OFFLINE'}
           <br />
@@ -152,7 +156,7 @@ export default function GameView({
             {hud.reloading ? 'RELOADING CARBINE' : 'CARBINE · OPTIC'}
           </div>
           <div className="mag">{String(hud.mag).padStart(2, '0')}</div>
-          <div className="res">/ {String(hud.reserve).padStart(2, '0')}</div>
+          <div className="res">/ ∞</div>
           {hud.reloading && (
             <div className="reload-track">
               <div className="reload-fill" style={{ width: `${Math.round(hud.reloadProg * 100)}%` }} />
@@ -262,6 +266,22 @@ export default function GameView({
             <div className="sheet" style={{ width: 360 }}>
               <h2>PAUSED</h2>
               <p className="help">Pointer released. Arena is still live.</p>
+              {hud.host && (
+                <div className="mode-row" style={{ marginBottom: 12 }}>
+                  <button
+                    className={`mode-btn ${hud.sky === 'day' ? 'on' : ''}`}
+                    onClick={() => engineRef.current?.setSky('day')}
+                  >
+                    DAY
+                  </button>
+                  <button
+                    className={`mode-btn ${hud.sky === 'night' ? 'on' : ''}`}
+                    onClick={() => engineRef.current?.setSky('night')}
+                  >
+                    NIGHT
+                  </button>
+                </div>
+              )}
               <div className="menu-actions" style={{ width: '100%' }}>
                 <button
                   className="btn primary"

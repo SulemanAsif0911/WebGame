@@ -24,6 +24,17 @@ function arg(flag, fallback) {
 const hostname = arg('-H', arg('--hostname', process.env.HOST || '0.0.0.0'));
 const port = parseInt(arg('-p', arg('--port', process.env.PORT || '3000')), 10);
 const dev = process.env.NODE_ENV !== 'production';
+const cliSky = process.argv.includes('--night')
+  ? 'night'
+  : String(arg('--sky', 'day')).toLowerCase() === 'night'
+    ? 'night'
+    : 'day';
+
+const arena = {
+  sky: cliSky,
+  mode: 'ffa',
+  hostId: null,
+};
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
@@ -213,17 +224,25 @@ function completeJoin(ws, msg) {
     shots: [],
     respawnTimer: null,
   };
+  const first = players.size === 0;
+  if (first) {
+    arena.hostId = id;
+    if (msg.sky === 'night' || msg.sky === 'day') arena.sky = msg.sky;
+  }
   players.set(id, p);
   send(ws, {
     t: 'welcome',
     id,
     name,
     spawn,
+    host: first,
+    sky: arena.sky,
+    arena: arenaPublic(),
     you: meta(p),
     players: [...players.values()].filter((q) => q.id !== id).map(meta),
   });
   broadcast({ t: 'join', player: meta(p) }, id);
-  console.log(`[iron-district] ${name} deployed · ${players.size} online`);
+  console.log(`[iron-district] ${name} deployed · ${players.size} online · ${arena.sky} FFA`);
   return p;
 }
 
@@ -301,6 +320,17 @@ function attachGame(wss) {
 
       if (msg.t === 'ping') {
         send(ws, { t: 'pong', n: msg.n, at: now() });
+        return;
+      }
+
+      if ((msg.t === 'arena' || msg.t === 'sky') && p.id === arena.hostId) {
+        if (msg.sky === 'day' || msg.sky === 'night') {
+          arena.sky = msg.sky;
+          for (const q of players.values()) {
+            send(q.ws, { t: 'arena', ...arenaPublic(), host: q.id === arena.hostId });
+          }
+          console.log(`[iron-district] host set sky ${arena.sky}`);
+        }
       }
     });
 
@@ -309,7 +339,15 @@ function attachGame(wss) {
       if (!player) return;
       if (player.respawnTimer) clearTimeout(player.respawnTimer);
       players.delete(player.id);
+      if (arena.hostId === player.id) {
+        arena.hostId = players.size ? [...players.values()][0].id : null;
+      }
       broadcastAll({ t: 'leave', id: player.id, name: player.name });
+      if (arena.hostId) {
+        for (const q of players.values()) {
+          send(q.ws, { t: 'arena', ...arenaPublic(), host: q.id === arena.hostId });
+        }
+      }
       console.log(`[iron-district] ${player.name} left · ${players.size} online`);
     });
     ws.on('error', () => {});
@@ -337,6 +375,12 @@ function attachGame(wss) {
 app.prepare().then(() => {
   const server = createServer((req, res) => {
     const parsed = parse(req.url, true);
+    if (parsed.pathname === '/arena') {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(JSON.stringify(arenaPublic()));
+      return;
+    }
     handle(req, res, parsed);
   });
 
@@ -358,6 +402,7 @@ app.prepare().then(() => {
     const shown = hostname === '0.0.0.0' ? 'localhost' : hostname;
     console.log(`[iron-district] ${dev ? 'dev' : 'prod'} http://${shown}:${port}`);
     console.log(`[iron-district] LAN bind ${hostname}:${port}  ·  websocket /ws`);
-    console.log(`[iron-district] every Deploy joins THIS arena — no bots`);
+    console.log(`[iron-district] every Deploy joins THIS FFA — no bots`);
+    console.log(`[iron-district] sky ${arena.sky} (host / first Deploy can change · --sky night)`);
   });
 });

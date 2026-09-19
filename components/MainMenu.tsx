@@ -11,12 +11,22 @@ export default function MainMenu({
   settings,
   onSettings,
   onDeploy,
+  sky,
+  onSky,
+  arenaLocked,
+  arenaSky,
+  arenaPlayers,
 }: {
   name: string;
   onName: (v: string) => void;
   settings: GameSettings;
   onSettings: (s: GameSettings) => void;
   onDeploy: () => void;
+  sky: 'day' | 'night';
+  onSky: (s: 'day' | 'night') => void;
+  arenaLocked: boolean;
+  arenaSky: 'day' | 'night';
+  arenaPlayers: number;
 }) {
   const [panel, setPanel] = useState<null | 'settings' | 'credits'>(null);
   const [host, setHost] = useState('LAN');
@@ -24,6 +34,7 @@ export default function MainMenu({
   useEffect(() => {
     setHost(window.location.host);
   }, []);
+  const shownSky = arenaLocked ? arenaSky : sky;
 
   return (
     <div className="menu-root">
@@ -32,7 +43,7 @@ export default function MainMenu({
       <div className="menu-frame">
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%' }}>
           <div className="brand">
-            <div className="kicker">Network Arena · Free For All</div>
+            <div className="kicker">Network Arena · FFA Multiplayer</div>
             <h1 className="logo">
               IRON
               <br />
@@ -51,6 +62,38 @@ export default function MainMenu({
               placeholder="OPERATOR"
               onChange={(e) => onName(e.target.value.toUpperCase())}
             />
+          </div>
+          <div className="mode-pick">
+            <div className="hp-label">{arenaLocked ? 'HOST LOCKED THIS ARENA' : 'HOST · FIRST DEPLOY SETS THE ARENA'}</div>
+            <div className="mode-row">
+              <button
+                className={`mode-btn ${shownSky === 'day' ? 'on' : ''}`}
+                disabled={arenaLocked}
+                onClick={() => onSky('day')}
+              >
+                DAY
+              </button>
+              <button
+                className={`mode-btn ${shownSky === 'night' ? 'on' : ''}`}
+                disabled={arenaLocked}
+                onClick={() => onSky('night')}
+              >
+                NIGHT
+              </button>
+            </div>
+            <div className="mode-row">
+              <button className="mode-btn on" disabled>
+                FREE FOR ALL
+              </button>
+              <button className="mode-btn on" disabled>
+                MULTIPLAYER
+              </button>
+            </div>
+            <p className="help" style={{ marginTop: 8 }}>
+              {arenaLocked
+                ? `Live: ${shownSky.toUpperCase()} · FFA · ${arenaPlayers} operator${arenaPlayers === 1 ? '' : 's'}`
+                : 'Day / Night is chosen by whoever runs the server or Deploys first. Everyone else joins that FFA.'}
+            </p>
           </div>
           <div className="menu-actions">
             <button className="btn primary" onClick={onDeploy}>

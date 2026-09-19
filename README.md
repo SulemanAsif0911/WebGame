@@ -23,6 +23,7 @@ Development, bound to a LAN address:
 ```bash
 npm install
 npm run dev -- -H 192.168.18.15 -p 3000
+npm run dev -- -H 192.168.18.15 -p 3000 --sky night
 ```
 
 Default bind is `0.0.0.0:3000` so other machines on the network can connect. Open `http://<host-ip>:3000`.
@@ -31,9 +32,9 @@ If Windows asks about Node.js firewall access, allow it on **private networks**.
 
 ## Play
 
-1. Menu loads with **Settings** (graphics, sensitivity, controls, crosshair), **Credits**, and **Deploy**.
-2. Deploy drops you into the single live arena.
-3. Anyone else on the network who opens the same IP joins that arena.
+1. Menu loads with **Settings**, **Credits**, and **Deploy**.
+2. Whoever **runs the server** or **Deploys first** picks **Day or Night**. The match is always **FFA multiplayer**. Later clients inherit that sky.
+3. Anyone else on the network who opens the same IP joins that arena. Hitscan only registers a true crosshair ray — near-misses do not kill.
 
 | Action | Default |
 | --- | --- |

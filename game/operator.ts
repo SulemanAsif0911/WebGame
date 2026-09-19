@@ -91,11 +91,11 @@ export function mountOpponent(
   });
   group.add(clone);
 
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.38, 0.92, 3, 8), ghostMat());
-  torso.position.y = 0.95;
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.72, 3, 8), ghostMat());
+  torso.position.y = 0.98;
   torso.userData.isHead = false;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), ghostMat());
-  head.position.y = 1.66;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), ghostMat());
+  head.position.y = 1.64;
   head.userData.isHead = true;
   group.add(torso, head);
 

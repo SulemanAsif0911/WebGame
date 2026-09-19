@@ -73,6 +73,8 @@ export type HudState = {
   maxHealth: number;
   gunTune: boolean;
   gunAlign: GunAlign;
+  sky: 'day' | 'night';
+  host: boolean;
 };
 
 export type EngineHooks = {
@@ -254,17 +256,27 @@ export class ArenaEngine {
   private spawnY = 2;
   private mapBox = new THREE.Box3();
   private invuln = 0;
+  private sky: 'day' | 'night' = 'day';
+  private host = false;
+  private skyUniforms: {
+    top: { value: THREE.Color };
+    mid: { value: THREE.Color };
+    bot: { value: THREE.Color };
+  } | null = null;
+  private pendingSky: 'day' | 'night' = 'day';
 
   constructor(
     canvas: HTMLCanvasElement,
     settings: GameSettings,
     name: string,
-    hooks: EngineHooks
+    hooks: EngineHooks,
+    opts?: { sky?: 'day' | 'night' }
   ) {
     this.canvas = canvas;
     this.settings = settings;
     this.hooks = hooks;
     this.myName = name.slice(0, 16) || 'Operator';
+    this.pendingSky = opts?.sky === 'night' ? 'night' : 'day';
     this.audio.setVolume(settings.volume);
 
     this.renderer = new THREE.WebGLRenderer({
@@ -333,7 +345,7 @@ export class ArenaEngine {
     this.renderer.setPixelRatio(this.pixelRatio());
     this.renderer.shadowMap.enabled = s.graphics !== 'low';
     this.sun.castShadow = s.graphics !== 'low';
-    if (this.scene.fog instanceof THREE.Fog) this.scene.fog.far = this.fogFar();
+    this.applySky(this.sky);
   }
 
   private pixelRatio() {
@@ -352,13 +364,14 @@ export class ArenaEngine {
 
   private buildSky() {
     const geo = new THREE.SphereGeometry(240, 24, 16);
+    this.skyUniforms = {
+      top: { value: new THREE.Color(0x8eb7d8) },
+      mid: { value: new THREE.Color(0xc3d4e2) },
+      bot: { value: new THREE.Color(0x6b5340) },
+    };
     const mat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      uniforms: {
-        top: { value: new THREE.Color(0x8eb7d8) },
-        mid: { value: new THREE.Color(0xc3d4e2) },
-        bot: { value: new THREE.Color(0x6b5340) },
-      },
+      uniforms: this.skyUniforms,
       vertexShader: `varying vec3 v; void main(){ v=normalize(position); gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
       fragmentShader: `uniform vec3 top; uniform vec3 mid; uniform vec3 bot; varying vec3 v; void main(){ float h=clamp(v.y*0.5+0.5,0.0,1.0); vec3 c=mix(bot,mid,smoothstep(0.0,0.48,h)); c=mix(c,top,smoothstep(0.48,1.0,h)); gl_FragColor=vec4(c,1.0); }`,
       depthWrite: false,
@@ -366,6 +379,31 @@ export class ArenaEngine {
     const sky = new THREE.Mesh(geo, mat);
     sky.frustumCulled = false;
     this.scene.add(sky);
+    this.applySky(this.pendingSky);
+  }
+
+  applySky(sky: 'day' | 'night') {
+    this.sky = sky === 'night' ? 'night' : 'day';
+    const night = this.sky === 'night';
+    if (this.skyUniforms) {
+      this.skyUniforms.top.value.setHex(night ? 0x070b16 : 0x8eb7d8);
+      this.skyUniforms.mid.value.setHex(night ? 0x141c2e : 0xc3d4e2);
+      this.skyUniforms.bot.value.setHex(night ? 0x0a0908 : 0x6b5340);
+    }
+    this.scene.background = new THREE.Color(night ? 0x07090e : 0x7ea3c4);
+    const fogFar = night ? Math.min(95, this.fogFar() * 0.62) : this.fogFar();
+    this.scene.fog = new THREE.Fog(night ? 0x10141c : 0x8aa8bf, night ? 12 : 28, fogFar);
+    this.hemi.color.setHex(night ? 0x6a7aaa : 0xc8ddf2);
+    this.hemi.groundColor.setHex(night ? 0x1a120c : 0x3a2a1a);
+    this.hemi.intensity = night ? 0.22 : 0.72;
+    this.sun.color.setHex(night ? 0xc5d4ee : 0xffe3c2);
+    this.sun.intensity = night ? 0.38 : 2.15;
+    this.sun.position.set(night ? -28 : 42, night ? 54 : 68, night ? -22 : 18);
+    this.fill.color.setHex(night ? 0xff8a3a : 0x88aadd);
+    this.fill.intensity = night ? 0.28 : this.settings.graphics === 'ultra' ? 0.45 : 0.22;
+    this.renderer.toneMappingExposure = night ? 0.68 : 1.12;
+    this.renderer.setClearColor(night ? 0x07090e : 0x0b1016, 1);
+    this.pushHud(true);
   }
 
   private buildTracers() {
@@ -763,7 +801,7 @@ export class ArenaEngine {
     this.ws.onopen = () => {
       this.connected = true;
       this.connecting = false;
-      this.ws?.send(JSON.stringify({ t: 'join', name: this.myName }));
+      this.ws?.send(JSON.stringify({ t: 'join', name: this.myName, sky: this.pendingSky }));
     };
     this.ws.onclose = () => {
       this.connected = false;
@@ -793,8 +831,15 @@ export class ArenaEngine {
       this.kills = msg.you?.kills || 0;
       this.deaths = msg.you?.deaths || 0;
       this.placeAtSafeSpawn();
+      this.host = !!msg.host;
+      if (msg.arena?.sky || msg.sky) this.applySky(msg.arena?.sky || msg.sky);
       const others = msg.players || [];
       for (const p of others) this.spawnRemote(p);
+      return;
+    }
+    if (msg.t === 'arena') {
+      this.host = msg.hostId === this.myId || !!msg.host;
+      if (msg.sky) this.applySky(msg.sky);
       return;
     }
     if (msg.t === 'join' && msg.player) {
@@ -1190,14 +1235,10 @@ export class ArenaEngine {
     const origin = this.camera.position.clone();
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
-    const spread = THREE.MathUtils.lerp(0.018, 0.0022, this.smooth01(this.adsBlend));
-    dir.x += (Math.random() - 0.5) * spread;
-    dir.y += (Math.random() - 0.5) * spread * 0.7;
-    dir.z += (Math.random() - 0.5) * spread;
     dir.normalize();
     this.spawnTracer(origin, dir);
 
-    this.raycaster.near = 0.2;
+    this.raycaster.near = 0.15;
     this.raycaster.far = 140;
     this.raycaster.set(origin, dir);
     const worldHits = this.raycaster.intersectObjects(this.colliders, false);
@@ -1208,36 +1249,13 @@ export class ArenaEngine {
       if (r.alive) hitList.push(...r.rig.hitMeshes);
     }
     const bodyHits = hitList.length ? this.raycaster.intersectObjects(hitList, false) : [];
-    const wallDist = worldHits[0] ? worldHits[0].distance : 999;
+    const wallDist = worldHits[0] ? worldHits[0].distance : 1e9;
 
     let target: number | null = null;
     let head = false;
-    let bestRadial = 1.6;
-    let bestDist = 150;
-    if (bodyHits[0] && bodyHits[0].object.userData.pid && bodyHits[0].distance < wallDist + 0.05) {
+    if (bodyHits[0] && bodyHits[0].object.userData.pid && bodyHits[0].distance <= wallDist + 0.02) {
       target = bodyHits[0].object.userData.pid;
       head = !!bodyHits[0].object.userData.isHead;
-      bestDist = bodyHits[0].distance;
-    }
-    for (const r of this.remotes.values()) {
-      if (!r.alive) continue;
-      const cx = r.x - origin.x;
-      const cy = r.y + 1.08 - origin.y;
-      const cz = r.z - origin.z;
-      const dist = Math.hypot(cx, cy, cz);
-      if (dist < 0.3 || dist > 140 || dist > wallDist + 0.25) continue;
-      const inv = 1 / dist;
-      const dot = dir.x * cx * inv + dir.y * cy * inv + dir.z * cz * inv;
-      if (dot < 0.78) continue;
-      const radial = Math.sqrt(Math.max(0, 1 - dot * dot)) * dist;
-      const limit = 1.25 + dist * 0.02;
-      if (radial > limit) continue;
-      if (radial < bestRadial || (Math.abs(radial - bestRadial) < 0.05 && dist < bestDist)) {
-        bestRadial = radial;
-        bestDist = dist;
-        target = r.id;
-        head = origin.y + dir.y * dist > r.y + 1.38;
-      }
     }
 
     if (target != null) {
@@ -1698,6 +1716,8 @@ export class ArenaEngine {
       maxHealth: MAX_HP,
       gunTune: this.gunTune,
       gunAlign: { ...this.gunAlign },
+      sky: this.sky,
+      host: this.host,
     });
   }
 
@@ -1722,6 +1742,14 @@ export class ArenaEngine {
     this.gunAlign = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
     saveGunAlign(this.gunAlign);
     this.pushHud(true);
+  }
+
+  setSky(sky: 'day' | 'night') {
+    if (!this.host) return;
+    this.applySky(sky);
+    if (this.ws && this.ws.readyState === 1) {
+      this.ws.send(JSON.stringify({ t: 'arena', sky }));
+    }
   }
 
   dispose() {
