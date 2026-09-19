@@ -46,7 +46,7 @@ If Windows asks about Node.js firewall access, allow it on **private networks**.
 | Scoreboard | Tab |
 | Pause | Esc |
 
-Weapon: FN FAL, 20-round magazine, hitscan 7.62, headshots are lethal.
+Weapon: FPV **.357 Magnum** (`357_pov.glb` from Gun-Models), 6-round cylinder, hitscan. Headshots are lethal. Hostiles and other operators use `opponent.glb`. An invisible circular wall keeps everyone inside the arena.
 
 ## Credits
 

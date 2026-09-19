@@ -13,10 +13,10 @@ import type { GameSettings } from './settings';
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-const MAG_SIZE = 20;
-const RESERVE_MAX = 80;
-const RELOAD_TIME = 3.58;
-const FIRE_INTERVAL = 0.092;
+const MAG_SIZE = 6;
+const RESERVE_MAX = 30;
+const RELOAD_TIME = 4.58;
+const FIRE_INTERVAL = 0.28;
 const WALK = 5.05;
 const SPRINT = 8.35;
 const CROUCH_SPEED = 2.35;
@@ -76,6 +76,7 @@ type RemoteVis = {
   mixer: THREE.AnimationMixer;
   reload: THREE.AnimationAction;
   name: THREE.Sprite;
+  hpFill: THREE.Mesh;
   x: number;
   y: number;
   z: number;
@@ -89,6 +90,7 @@ type RemoteVis = {
   alive: boolean;
   reloading: boolean;
   lastShoot: number;
+  health: number;
 };
 
 function makeLabel(text: string) {
@@ -110,8 +112,26 @@ function makeLabel(text: string) {
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
   const spr = new THREE.Sprite(mat);
   spr.scale.set(1.6, 0.4, 1);
-  spr.position.y = 2.05;
+  spr.position.y = 2.18;
   return spr;
+}
+
+function makeHpBar() {
+  const g = new THREE.Group();
+  const bg = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.92, 0.1),
+    new THREE.MeshBasicMaterial({ color: 0x1a0808, depthTest: false, transparent: true, opacity: 0.85 })
+  );
+  const fill = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.86, 0.06),
+    new THREE.MeshBasicMaterial({ color: 0x9dff6a, depthTest: false })
+  );
+  fill.name = 'hpFill';
+  fill.position.z = 0.002;
+  g.add(bg);
+  g.add(fill);
+  g.position.y = 1.92;
+  return { group: g, fill };
 }
 
 export class ArenaEngine {
@@ -133,9 +153,13 @@ export class ArenaEngine {
   private localRoot = new THREE.Group();
   private localMixer: THREE.AnimationMixer | null = null;
   private localReload: THREE.AnimationAction | null = null;
-  private camBone: THREE.Object3D | null = null;
+  private fpvIdle: THREE.AnimationAction | null = null;
+  private fpvFire: THREE.AnimationAction | null = null;
   private muzzleBone: THREE.Object3D | null = null;
-  private chestBone: THREE.Object3D | null = null;
+  private charScale = 1;
+  private charOffsetY = 0;
+  private arenaCenter = new THREE.Vector3();
+  private arenaRadius = 46;
 
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
@@ -263,6 +287,9 @@ export class ArenaEngine {
 
     this.scene.add(this.camera);
     this.camera.add(this.localRoot);
+    const gunLight = new THREE.PointLight(0xfff0dd, 1.15, 2.4, 2);
+    gunLight.position.set(0.08, 0.02, 0.05);
+    this.camera.add(gunLight);
 
     this.buildSky();
     this.buildTracers();
@@ -478,14 +505,24 @@ export class ArenaEngine {
       this.pushHud(true);
       this.setupMap(mapGltf.scene);
 
-      this.loadMsg = 'Deploying operator rig';
+      this.loadMsg = 'Mounting .357 FPV';
+      const fpvGltf = await loader.loadAsync('/models/fpv.glb', (e) => {
+        if (e.total) this.load = 0.56 + 0.18 * (e.loaded / e.total);
+        this.pushHud(true);
+      });
+      this.setupFPV(fpvGltf.scene, fpvGltf.animations || []);
+
+      this.loadMsg = 'Deploying hostiles';
       const charGltf = await loader.loadAsync('/models/opponent.glb', (e) => {
-        if (e.total) this.load = 0.58 + 0.32 * (e.loaded / e.total);
+        if (e.total) this.load = 0.76 + 0.18 * (e.loaded / e.total);
         this.pushHud(true);
       });
       this.template = charGltf.scene;
       this.clip = charGltf.animations[0] || null;
-      this.setupLocal(SkeletonUtils.clone(this.template) as THREE.Object3D);
+      const tbox = new THREE.Box3().setFromObject(this.template);
+      const th = Math.max(0.2, tbox.max.y - tbox.min.y);
+      this.charScale = 1.82 / th;
+      this.charOffsetY = -tbox.min.y * this.charScale;
       this.placeAtSafeSpawn();
       this.load = 1;
       this.loadMsg = 'Linking arena net';
@@ -529,56 +566,66 @@ export class ArenaEngine {
     this.mapRoot = root;
     this.mapBox.setFromObject(root);
     const c = this.mapBox.getCenter(new THREE.Vector3());
+    this.arenaCenter.copy(c);
+    const size = this.mapBox.getSize(new THREE.Vector3());
+    this.arenaRadius = Math.min(size.x, size.z) * 0.5 - 1.6;
+    if (!Number.isFinite(this.arenaRadius) || this.arenaRadius < 10) this.arenaRadius = 46;
     this.sun.target.position.copy(c);
     this.spawnY = this.mapBox.max.y * 0.15 + 2;
   }
 
-  private setupLocal(src: THREE.Object3D) {
-    const model = src;
-    model.traverse((o) => {
+  private setupFPV(src: THREE.Object3D, clips: THREE.AnimationClip[]) {
+    src.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
         mesh.castShadow = false;
         mesh.frustumCulled = false;
-        mesh.renderOrder = 10;
+        mesh.renderOrder = 20;
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         for (const mat of mats) {
           const m = mat as THREE.MeshStandardMaterial;
-          const name = (m.name || '').toLowerCase();
-          if (
-            name.includes('hair') ||
-            name.includes('mask') ||
-            name.includes('glasses') ||
-            name.includes('shoes') ||
-            name.includes('pants')
-          ) {
-            mesh.visible = false;
-          }
-          if (m.depthTest !== undefined) {
-            m.depthTest = true;
-            m.depthWrite = true;
-          }
+          if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+          m.depthTest = true;
+          m.depthWrite = true;
         }
       }
-      if (/CamBone/i.test(o.name)) this.camBone = o;
-      if (/MuzzleFlash/i.test(o.name)) this.muzzleBone = o;
-      if (/Chest_04/i.test(o.name)) this.chestBone = o;
+      if (/muzzle/i.test(o.name)) this.muzzleBone = o;
     });
-    this.localRoot.add(model);
-    this.localMixer = new THREE.AnimationMixer(model);
-    if (this.clip) {
-      this.localReload = this.localMixer.clipAction(this.clip);
+    this.localRoot.add(src);
+    this.localRoot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(this.localRoot);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+    const s = 0.52 / maxDim;
+    src.scale.setScalar(s);
+    this.localRoot.updateMatrixWorld(true);
+    const box2 = new THREE.Box3().setFromObject(this.localRoot);
+    const c = box2.getCenter(new THREE.Vector3());
+    src.position.add(new THREE.Vector3(0.11, -0.16, -0.34).sub(c));
+
+    this.localMixer = new THREE.AnimationMixer(src);
+    const find = (re: RegExp) => clips.find((cl) => re.test(cl.name));
+    const idleClip = find(/idle01/i) || find(/idle/i) || clips[0];
+    const fireClip = find(/@fire/i) || find(/fire/i);
+    const reloadClip = find(/@reload/i) || find(/reload/i);
+    if (idleClip) {
+      this.fpvIdle = this.localMixer.clipAction(idleClip);
+      this.fpvIdle.setLoop(THREE.LoopRepeat, Infinity);
+      this.fpvIdle.play();
+    }
+    if (fireClip) {
+      this.fpvFire = this.localMixer.clipAction(fireClip);
+      this.fpvFire.setLoop(THREE.LoopOnce, 1);
+      this.fpvFire.clampWhenFinished = true;
+    }
+    if (reloadClip) {
+      this.localReload = this.localMixer.clipAction(reloadClip);
       this.localReload.setLoop(THREE.LoopOnce, 1);
       this.localReload.clampWhenFinished = true;
-      this.localReload.enabled = true;
-      this.localReload.paused = true;
-      this.localReload.time = 0.02;
-      this.localReload.play();
     }
-    this.localMixer.addEventListener('finished', () => {
-      if (this.localReload) {
-        this.localReload.paused = true;
-        this.localReload.time = 0.02;
+    this.localMixer.addEventListener('finished', (e) => {
+      if (e.action === this.fpvFire || e.action === this.localReload) {
+        this.fpvIdle?.reset().fadeIn(0.12).play();
       }
     });
   }
@@ -723,6 +770,17 @@ export class ArenaEngine {
       this.headshotFx = !!msg.head;
       this.audio.hit(msg.head);
       if (msg.kill) this.audio.kill();
+      const s = this.scores.get(msg.target);
+      if (s) {
+        s.health = msg.health;
+        s.alive = msg.health > 0;
+      }
+      const r = this.remotes.get(msg.target);
+      if (r) {
+        r.health = msg.health;
+        r.alive = msg.health > 0;
+        r.root.visible = msg.health > 0;
+      }
       return;
     }
     if (msg.t === 'kill') {
@@ -775,6 +833,15 @@ export class ArenaEngine {
     }
     if (msg.t === 'hitfx') {
       this.spark(new THREE.Vector3(msg.x, msg.y, msg.z), msg.head ? 0xffe0e0 : 0xff5533);
+      if (typeof msg.health === 'number' && msg.id) {
+        const s = this.scores.get(msg.id);
+        if (s) {
+          s.health = msg.health;
+          s.alive = msg.health > 0;
+        }
+        const r = this.remotes.get(msg.id);
+        if (r) r.health = msg.health;
+      }
     }
   }
 
@@ -800,6 +867,8 @@ export class ArenaEngine {
     let r = this.remotes.get(p.id);
     if (!r) {
       const clone = SkeletonUtils.clone(this.template) as THREE.Object3D;
+      clone.scale.setScalar(this.charScale);
+      clone.position.y = this.charOffsetY;
       clone.traverse((o) => {
         const mesh = o as THREE.Mesh;
         if (mesh.isMesh) {
@@ -821,7 +890,9 @@ export class ArenaEngine {
         reload.play();
       }
       const name = makeLabel(p.name || 'Operator');
+      const hp = makeHpBar();
       root.add(name);
+      root.add(hp.group);
       this.scene.add(root);
       r = {
         id: p.id,
@@ -829,6 +900,7 @@ export class ArenaEngine {
         mixer,
         reload: reload!,
         name,
+        hpFill: hp.fill,
         x: p.x,
         y: p.y,
         z: p.z,
@@ -842,15 +914,22 @@ export class ArenaEngine {
         alive: p.alive,
         reloading: false,
         lastShoot: 0,
+        health: p.health ?? 100,
       };
       this.remotes.set(p.id, r);
     }
     r.tx = p.x;
-    r.ty = p.y;
     r.tz = p.z;
+    if (this.colliders.length) {
+      const gy = this.groundAt(p.x, p.z, 48);
+      r.ty = Number.isFinite(gy) ? gy : p.y;
+    } else {
+      r.ty = typeof p.y === 'number' ? p.y : r.ty;
+    }
     r.tyaw = p.yaw;
     r.tpitch = p.pitch;
     r.alive = p.alive;
+    r.health = typeof p.health === 'number' ? p.health : r.health;
     r.root.visible = p.alive;
     if (p.reload && r.reload && !r.reloading) {
       r.reloading = true;
@@ -876,9 +955,11 @@ export class ArenaEngine {
     this.reloadT = RELOAD_TIME;
     this.audio.reload();
     if (this.localReload) {
+      this.fpvFire?.stop();
+      this.fpvIdle?.fadeOut(0.08);
       this.localReload.reset();
       this.localReload.paused = false;
-      this.localReload.play();
+      this.localReload.fadeIn(0.05).play();
     }
   }
 
@@ -905,6 +986,11 @@ export class ArenaEngine {
     this.pitch += 0.012;
     this.audio.gunshot(0);
     this.muzzleLight.intensity = 18;
+    if (this.fpvFire) {
+      this.fpvIdle?.fadeOut(0.04);
+      this.fpvFire.reset();
+      this.fpvFire.fadeIn(0.02).play();
+    }
 
     const origin = this.camera.position.clone();
     const dir = new THREE.Vector3();
@@ -918,6 +1004,34 @@ export class ArenaEngine {
     const worldT = worldHits[0]?.distance ?? 120;
     if (worldHits[0]) this.spark(worldHits[0].point, 0xffcc77);
 
+    let target: number | null = null;
+    let head = false;
+    let bestD = worldT + 0.25;
+    for (const r of this.remotes.values()) {
+      if (!r.alive) continue;
+      const hits = this.raycaster.intersectObject(r.root, true);
+      if (hits[0] && hits[0].distance <= bestD) {
+        bestD = hits[0].distance;
+        target = r.id;
+        head = hits[0].point.y > r.y + 1.45;
+        this.hitmarker = 1;
+        this.headshotFx = head;
+        this.spark(hits[0].point, head ? 0xffe0e0 : 0xff5533);
+      } else {
+        const to = new THREE.Vector3(r.x, r.y + 1.05, r.z).sub(origin);
+        const dist = to.length();
+        if (dist < bestD) {
+          to.normalize();
+          if (dir.dot(to) > 0.992 && dist < 70) {
+            bestD = dist;
+            target = r.id;
+            head = origin.y + dir.y * dist > r.y + 1.45;
+            this.hitmarker = 0.85;
+          }
+        }
+      }
+    }
+
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(
         JSON.stringify({
@@ -928,20 +1042,10 @@ export class ArenaEngine {
           dx: dir.x,
           dy: dir.y,
           dz: dir.z,
+          target,
+          head,
         })
       );
-    }
-
-    for (const r of this.remotes.values()) {
-      if (!r.alive) continue;
-      const to = new THREE.Vector3(r.x, r.y + 1.1, r.z).sub(origin);
-      const dist = to.length();
-      if (dist > worldT + 0.2) continue;
-      const nd = dir.dot(to.normalize());
-      const rad = 0.45 / Math.max(1, dist);
-      if (nd > 1 - rad * 0.35) {
-        this.hitmarker = 0.6;
-      }
     }
   }
 
@@ -1049,8 +1153,10 @@ export class ArenaEngine {
     next.x += this.vel.x * dt;
     next.z += this.vel.z * dt;
     this.resolveWalls(next);
+    this.clampArena(next);
     next.y += this.vel.y * dt;
     this.resolveFloor(next);
+    this.clampArena(next);
     this.pos.copy(next);
 
     if (this.grounded && moving) {
@@ -1094,6 +1200,25 @@ export class ArenaEngine {
     }
   }
 
+  private clampArena(next: THREE.Vector3) {
+    const dx = next.x - this.arenaCenter.x;
+    const dz = next.z - this.arenaCenter.z;
+    const d = Math.hypot(dx, dz);
+    const maxR = this.arenaRadius - PLAYER_RADIUS - 0.15;
+    if (d > maxR && d > 0.001) {
+      const s = maxR / d;
+      next.x = this.arenaCenter.x + dx * s;
+      next.z = this.arenaCenter.z + dz * s;
+      const nx = dx / d;
+      const nz = dz / d;
+      const vn = this.vel.x * nx + this.vel.z * nz;
+      if (vn > 0) {
+        this.vel.x -= vn * nx;
+        this.vel.z -= vn * nz;
+      }
+    }
+  }
+
   private resolveFloor(next: THREE.Vector3) {
     this.raycaster.near = 0.01;
     this.raycaster.far = 3.2;
@@ -1127,21 +1252,12 @@ export class ArenaEngine {
     this.camera.rotation.set(this.pitch - this.recoil * 0.55, this.yaw, -this.sway * 0.35, 'YXZ');
     this.camera.updateMatrixWorld(true);
 
-    this.localRoot.position.set(0, 0, 0);
-    this.localRoot.quaternion.identity();
-    this.localRoot.scale.set(1, 1, 1);
-    this.localRoot.updateMatrixWorld(true);
-
-    if (this.camBone && this.alive) {
-      this.mtx1.copy(this.camera.matrixWorld).invert();
-      this.mtx1.multiply(this.camBone.matrixWorld);
-      this.mtx2.makeTranslation(0, 0, -0.12).multiply(this.mtx1.invert());
-      this.mtx2.decompose(this.localRoot.position, this.localRoot.quaternion, this.tmp2);
-      this.localRoot.scale.set(1, 1, 1);
-    } else {
-      this.localRoot.position.set(0.08, -1.56, -0.2);
-      this.localRoot.rotation.set(0.02, Math.PI, 0);
-    }
+    const adsT = this.ads ? 1 : 0;
+    const gx = THREE.MathUtils.lerp(0.0, -0.04, adsT);
+    const gy = THREE.MathUtils.lerp(0.0, 0.03, adsT);
+    const gz = THREE.MathUtils.lerp(0.0, 0.04, adsT);
+    this.localRoot.position.set(gx + this.sway * 0.4, gy + bobY * 0.6, gz);
+    this.localRoot.rotation.set(-this.recoil * 0.25, this.sway * 0.15, -this.sway * 0.2);
     if (!this.alive && this.killedBy) this.camera.position.y += 0.4;
   }
 
@@ -1153,9 +1269,17 @@ export class ArenaEngine {
       r.z = THREE.MathUtils.lerp(r.z, r.tz, 1 - Math.pow(0.001, dt));
       r.yaw = THREE.MathUtils.lerp(r.yaw, r.tyaw, 1 - Math.pow(0.0008, dt));
       r.root.position.set(r.x, r.y, r.z);
-      r.root.rotation.y = r.yaw;
+      r.root.rotation.y = r.yaw + Math.PI;
       r.lastShoot = Math.max(0, r.lastShoot - dt);
       r.name.quaternion.copy(this.camera.quaternion);
+      const hpParent = r.hpFill.parent;
+      if (hpParent) hpParent.quaternion.copy(this.camera.quaternion);
+      const hp = Math.max(0, Math.min(1, r.health / 100));
+      r.hpFill.scale.x = Math.max(0.04, hp);
+      r.hpFill.position.x = -0.43 * (1 - hp);
+      (r.hpFill.material as THREE.MeshBasicMaterial).color.setHex(
+        hp > 0.5 ? 0x9dff6a : hp > 0.25 ? 0xffcc33 : 0xff4d3a
+      );
     }
   }
 

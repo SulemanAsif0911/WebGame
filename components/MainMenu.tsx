@@ -98,13 +98,18 @@ export default function MainMenu({
               00amza — Sketchfab — CC BY 4.0
             </p>
             <p>
-              <strong>FN FAL Reload Animation (operator + rifle)</strong>
+              <strong>Operator (third person / hostiles)</strong>
               <br />
               Stavich — Sketchfab — CC BY-NC-ND 4.0
             </p>
             <p>
-              First-person view is driven from the operator rig (CamBone / FPPBone). Remote
-              players render the same detailed mesh. Firearms audio is synthesized locally.
+              <strong>FPV .357 Magnum (arms + revolver)</strong>
+              <br />
+              From SulemanAsif0911/Gun-Models — 357_pov.glb
+            </p>
+            <p>
+              First-person view uses the POV revolver rig. Other operators and hostiles use
+              the opponent mesh. Firearms audio is synthesized locally.
             </p>
             <small>Not affiliated with any publisher. For private network play.</small>
           </div>

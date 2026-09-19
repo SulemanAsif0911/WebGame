@@ -31,14 +31,16 @@ const handle = app.getRequestHandler();
 const TICK_MS = 50;
 const MAX_PLAYERS = 16;
 const MAX_HEALTH = 100;
-const BODY_DAMAGE = 34;
+const BODY_DAMAGE = 40;
 const HEAD_DAMAGE = 100;
 const MAX_SPEED = 14;
-const PLAYER_RADIUS = 0.42;
-const PLAYER_HEIGHT = 1.78;
-const HEAD_START = 1.48;
-const SHOT_COOLDOWN_MS = 85;
+const PLAYER_RADIUS = 0.55;
+const PLAYER_HEIGHT = 1.85;
+const HEAD_START = 1.42;
+const SHOT_COOLDOWN_MS = 90;
 const RESPAWN_MS = 3200;
+const BOT_COUNT = 5;
+const ARENA_RADIUS = 46;
 
 const SPAWNS = [
   [18.5, 4, 16.0],
@@ -102,7 +104,130 @@ function publicPlayer(p) {
     sprint: p.sprint,
     reload: p.reload,
     shoot: p.shoot,
+    bot: !!p.bot,
   };
+}
+
+function makePlayer(id, name, bot) {
+  const spawn = pickSpawn(id);
+  return {
+    id,
+    name,
+    bot: !!bot,
+    x: spawn.x,
+    y: spawn.y,
+    z: spawn.z,
+    yaw: Math.random() * Math.PI * 2,
+    pitch: 0,
+    health: MAX_HEALTH,
+    kills: 0,
+    deaths: 0,
+    alive: true,
+    crouch: false,
+    sprint: false,
+    reload: false,
+    shoot: 0,
+    lastShot: 0,
+    lastInput: now(),
+    diedAt: 0,
+    wander: Math.random() * Math.PI * 2,
+  };
+}
+
+function rayHitsAabb(ox, oy, oz, dx, dy, dz, px, py, pz, crouch) {
+  const h = crouch ? PLAYER_HEIGHT * 0.72 : PLAYER_HEIGHT;
+  const r = crouch ? PLAYER_RADIUS * 1.1 : PLAYER_RADIUS;
+  const minX = px - r;
+  const maxX = px + r;
+  const minY = py - 0.05;
+  const maxY = py + h;
+  const minZ = pz - r;
+  const maxZ = pz + r;
+  const len = Math.hypot(dx, dy, dz) || 1;
+  dx /= len;
+  dy /= len;
+  dz /= len;
+  let tmin = 0.02;
+  let tmax = 110;
+  const slabs = [
+    [minX, maxX, ox, dx],
+    [minY, maxY, oy, dy],
+    [minZ, maxZ, oz, dz],
+  ];
+  for (const [mn, mx, o, d] of slabs) {
+    if (Math.abs(d) < 1e-8) {
+      if (o < mn || o > mx) return null;
+      continue;
+    }
+    let t1 = (mn - o) / d;
+    let t2 = (mx - o) / d;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+    }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmax < tmin) return null;
+  }
+  const hitY = oy + dy * tmin - py;
+  return { t: tmin, head: hitY >= (crouch ? HEAD_START * 0.72 : HEAD_START), hitY };
+}
+
+function applyDamage(attacker, victim, head) {
+  if (!attacker.alive || !victim.alive || attacker.id === victim.id) return false;
+  const dmg = head ? HEAD_DAMAGE : BODY_DAMAGE;
+  victim.health = Math.max(0, victim.health - dmg);
+  const vSock = sockets.get(victim.id);
+  if (vSock) {
+    send(vSock, {
+      t: 'hurt',
+      by: attacker.id,
+      dmg,
+      health: victim.health,
+      head,
+      dirx: 0,
+      dirz: 0,
+    });
+  }
+  const aSock = sockets.get(attacker.id);
+  if (aSock) {
+    send(aSock, {
+      t: 'confirm',
+      target: victim.id,
+      dmg,
+      health: victim.health,
+      head,
+      kill: victim.health <= 0,
+    });
+  }
+  broadcast({
+    t: 'hitfx',
+    x: victim.x,
+    y: victim.y + (head ? 1.6 : 1.1),
+    z: victim.z,
+    head,
+    id: victim.id,
+    health: victim.health,
+  });
+  if (victim.health <= 0) {
+    victim.alive = false;
+    victim.deaths += 1;
+    attacker.kills += 1;
+    victim.diedAt = now();
+    broadcast({
+      t: 'kill',
+      id: victim.id,
+      by: attacker.id,
+      name: victim.name,
+      killer: attacker.name,
+      head,
+      kills: attacker.kills,
+      deaths: victim.deaths,
+    });
+    setTimeout(() => respawn(victim.id), RESPAWN_MS);
+  }
+  return true;
 }
 
 function send(ws, msg) {
@@ -119,58 +244,7 @@ function broadcast(msg, exceptId) {
   }
 }
 
-function rayHitsCapsule(ox, oy, oz, dx, dy, dz, px, py, pz, crouch) {
-  const height = crouch ? PLAYER_HEIGHT * 0.72 : PLAYER_HEIGHT;
-  const radius = crouch ? PLAYER_RADIUS * 1.05 : PLAYER_RADIUS;
-  const y0 = py + radius;
-  const y1 = py + height - 0.08;
-  const len = Math.hypot(dx, dy, dz) || 1;
-  dx /= len;
-  dy /= len;
-  dz /= len;
-  const maxDist = 110;
-
-  const abx = 0;
-  const aby = y1 - y0;
-  const abz = 0;
-  const aox = ox - px;
-  const aoy = oy - y0;
-  const aoz = oz - pz;
-
-  const dDotAB = dy * aby;
-  const aoDotAB = aoy * aby;
-  const abDotAB = aby * aby || 1e-6;
-  const dDotD = 1;
-  const aoDotD = aox * dx + aoy * dy + aoz * dz;
-
-  let t = 0;
-  let s = 0;
-  const denom = dDotD * abDotAB - dDotAB * dDotAB;
-  if (Math.abs(denom) < 1e-8) {
-    s = clamp(aoDotAB / abDotAB, 0, 1);
-    t = aoDotD;
-  } else {
-    t = (abDotAB * aoDotD - dDotAB * aoDotAB) / denom;
-    s = (dDotAB * aoDotD - dDotD * aoDotAB) / denom;
-    s = clamp(s, 0, 1);
-  }
-  t = clamp(t, 0.05, maxDist);
-
-  const cx = px;
-  const cy = y0 + s * aby;
-  const cz = pz;
-  const qx = ox + dx * t;
-  const qy = oy + dy * t;
-  const qz = oz + dz * t;
-  const dist = Math.hypot(qx - cx, qy - cy, qz - cz);
-  if (dist > radius + 0.05) return null;
-
-  const hitY = cy - py;
-  const head = hitY >= (crouch ? HEAD_START * 0.72 : HEAD_START);
-  return { t, head, hitY };
-}
-
-function handleShoot(attacker, origin, dir) {
+function handleShoot(attacker, origin, dir, targetId, headHint) {
   if (!attacker.alive) return;
   const tnow = now();
   if (tnow - attacker.lastShot < SHOT_COOLDOWN_MS) return;
@@ -184,17 +258,6 @@ function handleShoot(attacker, origin, dir) {
   const dy = dir.y;
   const dz = dir.z;
 
-  const fromEye = Math.hypot(ox - attacker.x, oz - attacker.z);
-  if (fromEye > 3.5) return;
-
-  let best = null;
-  for (const p of players.values()) {
-    if (p.id === attacker.id || !p.alive) continue;
-    const hit = rayHitsCapsule(ox, oy, oz, dx, dy, dz, p.x, p.y, p.z, p.crouch);
-    if (!hit) continue;
-    if (!best || hit.t < best.t) best = { player: p, ...hit };
-  }
-
   broadcast(
     {
       t: 'shot',
@@ -206,60 +269,28 @@ function handleShoot(attacker, origin, dir) {
       dy,
       dz,
     },
-    null
+    attacker.id
   );
 
-  if (!best) return;
-
-  const dmg = best.head ? HEAD_DAMAGE : BODY_DAMAGE;
-  const victim = best.player;
-  victim.health = Math.max(0, victim.health - dmg);
-
-  send(sockets.get(victim.id), {
-    t: 'hurt',
-    by: attacker.id,
-    dmg,
-    health: victim.health,
-    head: best.head,
-    dirx: dx,
-    dirz: dz,
-  });
-
-  send(sockets.get(attacker.id), {
-    t: 'confirm',
-    target: victim.id,
-    dmg,
-    health: victim.health,
-    head: best.head,
-    kill: victim.health <= 0,
-  });
-
-  broadcast({
-    t: 'hitfx',
-    x: victim.x,
-    y: victim.y + (best.head ? 1.6 : 1.1),
-    z: victim.z,
-    head: best.head,
-    id: victim.id,
-  });
-
-  if (victim.health <= 0) {
-    victim.alive = false;
-    victim.deaths += 1;
-    attacker.kills += 1;
-    victim.diedAt = tnow;
-    broadcast({
-      t: 'kill',
-      id: victim.id,
-      by: attacker.id,
-      name: victim.name,
-      killer: attacker.name,
-      head: best.head,
-      kills: attacker.kills,
-      deaths: victim.deaths,
-    });
-    setTimeout(() => respawn(victim.id), RESPAWN_MS);
+  if (targetId) {
+    const victim = players.get(Number(targetId));
+    if (victim && victim.alive && victim.id !== attacker.id) {
+      const dist = Math.hypot(victim.x - ox, victim.y + 1.0 - oy, victim.z - oz);
+      if (dist < 95) {
+        applyDamage(attacker, victim, !!headHint);
+        return;
+      }
+    }
   }
+
+  let best = null;
+  for (const p of players.values()) {
+    if (p.id === attacker.id || !p.alive) continue;
+    const hit = rayHitsAabb(ox, oy, oz, dx, dy, dz, p.x, p.y, p.z, p.crouch);
+    if (!hit) continue;
+    if (!best || hit.t < best.t) best = { player: p, ...hit };
+  }
+  if (best) applyDamage(attacker, best.player, best.head);
 }
 
 function respawn(id) {
@@ -291,28 +322,15 @@ function attachGame(wss) {
       return;
     }
 
+    const humans = [...players.values()].filter((p) => !p.bot).length;
+    if (humans >= MAX_PLAYERS) {
+      send(ws, { t: 'full' });
+      ws.close();
+      return;
+    }
+
     const id = nextId++;
-    const spawn = pickSpawn(id);
-    const player = {
-      id,
-      name: 'Operator-' + id,
-      x: spawn.x,
-      y: spawn.y,
-      z: spawn.z,
-      yaw: 0,
-      pitch: 0,
-      health: MAX_HEALTH,
-      kills: 0,
-      deaths: 0,
-      alive: true,
-      crouch: false,
-      sprint: false,
-      reload: false,
-      shoot: 0,
-      lastShot: 0,
-      lastInput: now(),
-      diedAt: 0,
-    };
+    const player = makePlayer(id, 'Operator-' + id, false);
     players.set(id, player);
     sockets.set(id, ws);
 
@@ -380,7 +398,13 @@ function attachGame(wss) {
         const dy = Number(msg.dy);
         const dz = Number(msg.dz);
         if (![ox, oy, oz, dx, dy, dz].every(Number.isFinite)) return;
-        handleShoot(p, { x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
+        handleShoot(
+          p,
+          { x: ox, y: oy, z: oz },
+          { x: dx, y: dy, z: dz },
+          msg.target,
+          msg.head
+        );
         return;
       }
 
@@ -393,8 +417,30 @@ function attachGame(wss) {
     ws.on('error', () => removePlayer(id));
   });
 
+  for (let i = 0; i < BOT_COUNT; i++) {
+    const id = nextId++;
+    players.set(id, makePlayer(id, 'HOSTILE-' + (i + 1), true));
+  }
+
   setInterval(() => {
-    if (!players.size) return;
+    const dt = TICK_MS / 1000;
+    for (const p of players.values()) {
+      if (!p.bot || !p.alive) continue;
+      if (Math.random() < 0.02) p.wander += (Math.random() - 0.5) * 1.6;
+      p.yaw += (p.wander - p.yaw) * 0.08;
+      const spd = 2.2;
+      p.x += Math.sin(p.yaw) * spd * dt;
+      p.z += Math.cos(p.yaw) * spd * dt;
+      const d = Math.hypot(p.x, p.z);
+      if (d > ARENA_RADIUS - 3) {
+        const s = (ARENA_RADIUS - 3) / d;
+        p.x *= s;
+        p.z *= s;
+        p.yaw += Math.PI * 0.6;
+        p.wander = p.yaw;
+      }
+    }
+    if (!sockets.size) return;
     const payload = JSON.stringify({
       t: 'state',
       players: [...players.values()].map(publicPlayer),

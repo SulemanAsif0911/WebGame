@@ -7,8 +7,8 @@ import SettingsPanel, { CrosshairSVG } from './SettingsPanel';
 
 const EMPTY: HudState = {
   health: 100,
-  mag: 20,
-  reserve: 80,
+  mag: 6,
+  reserve: 30,
   reloading: false,
   ads: false,
   sprint: false,
@@ -134,7 +134,7 @@ export default function GameView({
         </div>
         <div className={`ammo ${hud.reloading || hud.ammoFlash > 0 ? 'reload' : ''}`}>
           <div className="hp-label" style={{ textAlign: 'right' }}>
-            {hud.reloading ? 'RELOADING FN FAL' : '7.62 NATO'}
+            {hud.reloading ? 'RELOADING .357' : '.357 MAGNUM'}
           </div>
           <div className="mag">{String(hud.mag).padStart(2, '0')}</div>
           <div className="res">/ {String(hud.reserve).padStart(2, '0')}</div>
