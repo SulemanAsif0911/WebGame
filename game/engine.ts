@@ -842,6 +842,15 @@ export class ArenaEngine {
         v.alive = false;
         v.health = 0;
       }
+      const dead = this.remotes.get(msg.id);
+      if (dead) {
+        dead.alive = false;
+        dead.health = 0;
+        dead.root.visible = false;
+      }
+      if (msg.id === this.myId && this.alive) {
+        this.onDeath(msg.killer || 'Operator');
+      }
       return;
     }
     if (msg.t === 'spawn') {
@@ -858,6 +867,7 @@ export class ArenaEngine {
         const r = this.remotes.get(msg.id);
         if (r) {
           r.alive = true;
+          r.health = 100;
           r.root.visible = true;
           r.tx = msg.x;
           r.ty = msg.y;
@@ -884,7 +894,11 @@ export class ArenaEngine {
           s.alive = msg.health > 0;
         }
         const r = this.remotes.get(msg.id);
-        if (r) r.health = msg.health;
+        if (r) {
+          r.health = msg.health;
+          r.alive = msg.health > 0;
+          r.root.visible = msg.health > 0;
+        }
       }
     }
   }
@@ -1054,42 +1068,51 @@ export class ArenaEngine {
     const origin = this.camera.position.clone();
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
+    dir.normalize();
     this.spawnTracer(origin, dir);
 
-    this.raycaster.near = 0.05;
+    this.raycaster.near = 0.2;
     this.raycaster.far = 140;
     this.raycaster.set(origin, dir);
     const worldHits = this.raycaster.intersectObjects(this.colliders, false);
-    const worldT = worldHits[0]?.distance ?? 140;
     if (worldHits[0]) this.spark(worldHits[0].point, 0xffcc77);
 
     let target: number | null = null;
     let head = false;
-    let bestD = worldT + 0.45;
+    let bestRadial = 1.6;
+    let bestDist = 150;
     for (const r of this.remotes.values()) {
       if (!r.alive) continue;
-      const hits = this.raycaster.intersectObject(r.root, true);
-      if (hits[0] && hits[0].distance <= bestD) {
-        bestD = hits[0].distance;
+      const cx = r.x - origin.x;
+      const cy = r.y + 1.08 - origin.y;
+      const cz = r.z - origin.z;
+      const dist = Math.hypot(cx, cy, cz);
+      if (dist < 0.3 || dist > 140) continue;
+      const inv = 1 / dist;
+      const dot = dir.x * cx * inv + dir.y * cy * inv + dir.z * cz * inv;
+      if (dot < 0.78) continue;
+      const radial = Math.sqrt(Math.max(0, 1 - dot * dot)) * dist;
+      const limit = 1.25 + dist * 0.02;
+      if (radial > limit) continue;
+      if (radial < bestRadial || (Math.abs(radial - bestRadial) < 0.05 && dist < bestDist)) {
+        bestRadial = radial;
+        bestDist = dist;
         target = r.id;
-        const hitName = (hits[0].object as THREE.Object3D).userData?.hit;
-        head = hitName === 'head' || hits[0].point.y > r.y + 1.42;
+        head = origin.y + dir.y * dist > r.y + 1.38;
+      }
+    }
+
+    if (target != null) {
+      const r = this.remotes.get(target);
+      if (r) {
+        const dmg = head ? 100 : 50;
+        r.health = Math.max(0, r.health - dmg);
         this.hitmarker = 1;
         this.headshotFx = head;
-        this.spark(hits[0].point, head ? 0xffe0e0 : 0xff5533);
-        continue;
-      }
-      const chest = new THREE.Vector3(r.x, r.y + 1.05, r.z);
-      const to = chest.sub(origin);
-      const dist = to.length();
-      if (dist < bestD && dist < 90) {
-        to.normalize();
-        if (dir.dot(to) > 0.975) {
-          bestD = dist;
-          target = r.id;
-          head = origin.y + dir.y * dist > r.y + 1.42;
-          this.hitmarker = 0.9;
-          this.headshotFx = head;
+        this.spark(new THREE.Vector3(r.x, r.y + (head ? 1.6 : 1.1), r.z), head ? 0xffe0e0 : 0xff5533);
+        if (r.health <= 0) {
+          r.alive = false;
+          r.root.visible = false;
         }
       }
     }

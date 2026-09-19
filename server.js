@@ -31,7 +31,7 @@ const handle = app.getRequestHandler();
 const TICK_MS = 50;
 const MAX_PLAYERS = 16;
 const MAX_HEALTH = 100;
-const BODY_DAMAGE = 40;
+const BODY_DAMAGE = 50;
 const HEAD_DAMAGE = 100;
 const MAX_SPEED = 14;
 const PLAYER_RADIUS = 0.72;
@@ -130,44 +130,24 @@ function makePlayer(id, name) {
   };
 }
 
-function rayHitsAabb(ox, oy, oz, dx, dy, dz, px, py, pz, crouch) {
-  const h = crouch ? PLAYER_HEIGHT * 0.72 : PLAYER_HEIGHT;
-  const r = crouch ? PLAYER_RADIUS * 1.1 : PLAYER_RADIUS;
-  const minX = px - r;
-  const maxX = px + r;
-  const minY = py - 0.05;
-  const maxY = py + h;
-  const minZ = pz - r;
-  const maxZ = pz + r;
+function shotHitsPlayer(ox, oy, oz, dx, dy, dz, p) {
   const len = Math.hypot(dx, dy, dz) || 1;
   dx /= len;
   dy /= len;
   dz /= len;
-  let tmin = 0.02;
-  let tmax = 110;
-  const slabs = [
-    [minX, maxX, ox, dx],
-    [minY, maxY, oy, dy],
-    [minZ, maxZ, oz, dz],
-  ];
-  for (const [mn, mx, o, d] of slabs) {
-    if (Math.abs(d) < 1e-8) {
-      if (o < mn || o > mx) return null;
-      continue;
-    }
-    let t1 = (mn - o) / d;
-    let t2 = (mx - o) / d;
-    if (t1 > t2) {
-      const tmp = t1;
-      t1 = t2;
-      t2 = tmp;
-    }
-    tmin = Math.max(tmin, t1);
-    tmax = Math.min(tmax, t2);
-    if (tmax < tmin) return null;
-  }
-  const hitY = oy + dy * tmin - py;
-  return { t: tmin, head: hitY >= (crouch ? HEAD_START * 0.72 : HEAD_START), hitY };
+  const chestY = p.y + (p.crouch ? 0.72 : 1.08);
+  const vx = p.x - ox;
+  const vy = chestY - oy;
+  const vz = p.z - oz;
+  const dist = Math.hypot(vx, vy, vz);
+  if (dist < 0.25 || dist > 150) return null;
+  const dot = (dx * vx + dy * vy + dz * vz) / dist;
+  if (dot < 0.72) return null;
+  const radial = Math.sqrt(Math.max(0, 1 - dot * dot)) * dist;
+  const maxRadial = 1.35 + dist * 0.025;
+  if (radial > maxRadial) return null;
+  const hitY = oy + dy * dist;
+  return { t: dist, head: hitY >= p.y + (p.crouch ? 1.05 : HEAD_START) };
 }
 
 function applyDamage(attacker, victim, head) {
@@ -317,21 +297,14 @@ function removePlayer(id) {
 
 function attachGame(wss) {
   wss.on('connection', (ws) => {
-    if (players.size >= MAX_PLAYERS) {
-      send(ws, { t: 'full' });
-      ws.close();
-      return;
-    }
-
-    const humans = [...players.values()].filter((p) => !p.bot).length;
-    if (humans >= MAX_PLAYERS) {
+    if (sockets.size >= MAX_PLAYERS) {
       send(ws, { t: 'full' });
       ws.close();
       return;
     }
 
     const id = nextId++;
-    const player = makePlayer(id, 'Operator-' + id, false);
+    const player = makePlayer(id, 'Operator-' + id);
     players.set(id, player);
     sockets.set(id, ws);
 
