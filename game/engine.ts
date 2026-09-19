@@ -517,7 +517,7 @@ export class ArenaEngine {
       });
       this.setupFPV(fpvGltf.scene, fpvGltf.animations || []);
 
-      this.loadMsg = 'Deploying hostiles';
+      this.loadMsg = 'Staging operators';
       const charGltf = await loader.loadAsync('/models/opponent.glb', (e) => {
         if (e.total) this.load = 0.76 + 0.18 * (e.loaded / e.total);
         this.pushHud(true);
@@ -609,16 +609,17 @@ export class ArenaEngine {
       }
       if (/muzzle/i.test(o.name)) this.muzzleBone = o;
     });
+    src.rotation.y = Math.PI;
     this.localRoot.add(src);
     this.localRoot.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(this.localRoot);
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 0.001);
-    src.scale.setScalar(0.7 / maxDim);
+    src.scale.setScalar(0.78 / maxDim);
     this.localRoot.updateMatrixWorld(true);
     const box2 = new THREE.Box3().setFromObject(this.localRoot);
     const c = box2.getCenter(new THREE.Vector3());
-    src.position.add(new THREE.Vector3(0.13, -0.17, -0.38).sub(c));
+    src.position.add(new THREE.Vector3(0.18, -0.24, -0.36).sub(c));
 
     this.localMixer = new THREE.AnimationMixer(src);
     const namedIdle = clips.find((cl) => /idle01|idle/i.test(cl.name) && !/all/i.test(cl.name));
@@ -735,19 +736,36 @@ export class ArenaEngine {
         const gy = this.groundAt(msg.you.x, msg.you.z, 40);
         this.pos.set(msg.you.x, gy + 0.05, msg.you.z);
       }
-      for (const p of msg.players) this.upsertScore(p);
+      for (const p of msg.players) {
+        this.upsertScore(p);
+        if (p.id !== this.myId) this.syncRemote(p);
+      }
       return;
     }
     if (msg.t === 'state') {
+      const seen = new Set<number>();
       for (const p of msg.players) {
+        seen.add(p.id);
         this.upsertScore(p);
-        if (p.id === this.myId) continue;
+        if (p.id === this.myId) {
+          if (typeof p.health === 'number' && p.alive) this.health = p.health;
+          continue;
+        }
         this.syncRemote(p);
+      }
+      for (const id of [...this.remotes.keys()]) {
+        if (!seen.has(id)) {
+          const r = this.remotes.get(id);
+          if (r) this.scene.remove(r.root);
+          this.remotes.delete(id);
+          this.scores.delete(id);
+        }
       }
       return;
     }
     if (msg.t === 'join') {
       this.upsertScore(msg.player);
+      if (msg.player?.id !== this.myId) this.syncRemote(msg.player);
       return;
     }
     if (msg.t === 'leave') {
@@ -783,12 +801,11 @@ export class ArenaEngine {
       return;
     }
     if (msg.t === 'hurt') {
-      if (this.invuln > 0) return;
       this.health = msg.health;
       this.hurt = 1;
       this.audio.hurt();
-      this.vel.x += (msg.dirx || 0) * 1.4;
-      this.vel.z += (msg.dirz || 0) * 1.4;
+      this.vel.x += (msg.dirx || 0) * 2.2;
+      this.vel.z += (msg.dirz || 0) * 2.2;
       if (this.health <= 0) this.onDeath(this.scores.get(msg.by)?.name || 'Operator');
       return;
     }
@@ -918,8 +935,22 @@ export class ArenaEngine {
       }
       const name = makeLabel(p.name || 'Operator');
       const hp = makeHpBar();
+      const ghost = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        colorWrite: false,
+      });
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.88, 3, 6), ghost);
+      body.position.y = 0.92;
+      body.userData.hit = 'body';
+      const skull = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8), ghost.clone());
+      skull.position.y = 1.64;
+      skull.userData.hit = 'head';
       root.add(name);
       root.add(hp.group);
+      root.add(body);
+      root.add(skull);
       this.scene.add(root);
       r = {
         id: p.id,
@@ -1026,36 +1057,39 @@ export class ArenaEngine {
     this.spawnTracer(origin, dir);
 
     this.raycaster.near = 0.05;
-    this.raycaster.far = 120;
+    this.raycaster.far = 140;
     this.raycaster.set(origin, dir);
     const worldHits = this.raycaster.intersectObjects(this.colliders, false);
-    const worldT = worldHits[0]?.distance ?? 120;
+    const worldT = worldHits[0]?.distance ?? 140;
     if (worldHits[0]) this.spark(worldHits[0].point, 0xffcc77);
 
     let target: number | null = null;
     let head = false;
-    let bestD = worldT + 0.25;
+    let bestD = worldT + 0.45;
     for (const r of this.remotes.values()) {
       if (!r.alive) continue;
       const hits = this.raycaster.intersectObject(r.root, true);
       if (hits[0] && hits[0].distance <= bestD) {
         bestD = hits[0].distance;
         target = r.id;
-        head = hits[0].point.y > r.y + 1.45;
+        const hitName = (hits[0].object as THREE.Object3D).userData?.hit;
+        head = hitName === 'head' || hits[0].point.y > r.y + 1.42;
         this.hitmarker = 1;
         this.headshotFx = head;
         this.spark(hits[0].point, head ? 0xffe0e0 : 0xff5533);
-      } else {
-        const to = new THREE.Vector3(r.x, r.y + 1.05, r.z).sub(origin);
-        const dist = to.length();
-        if (dist < bestD) {
-          to.normalize();
-          if (dir.dot(to) > 0.992 && dist < 70) {
-            bestD = dist;
-            target = r.id;
-            head = origin.y + dir.y * dist > r.y + 1.45;
-            this.hitmarker = 0.85;
-          }
+        continue;
+      }
+      const chest = new THREE.Vector3(r.x, r.y + 1.05, r.z);
+      const to = chest.sub(origin);
+      const dist = to.length();
+      if (dist < bestD && dist < 90) {
+        to.normalize();
+        if (dir.dot(to) > 0.975) {
+          bestD = dist;
+          target = r.id;
+          head = origin.y + dir.y * dist > r.y + 1.42;
+          this.hitmarker = 0.9;
+          this.headshotFx = head;
         }
       }
     }

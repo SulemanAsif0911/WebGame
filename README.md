@@ -5,7 +5,7 @@ Networked first-person shooter built in **Next.js**. One shared urban arena. Eve
 Uses the repository models:
 
 - `shooting_game_enviornment_map_tdm.glb` — arena
-- `opponent.glb` — third-person operator mesh for other players and hostiles
+- `opponent.glb` — third-person operator mesh for other players
 - `fpv.glb` — first-person carbine with optic (from Gun-Models)
 
 ## Launch
@@ -47,7 +47,7 @@ If Windows asks about Node.js firewall access, allow it on **private networks**.
 | Scoreboard | Tab |
 | Pause | Esc |
 
-Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), 30-round mag, hitscan. Hold ADS to look through the sight with zoom. Headshots are lethal. Hostiles and other operators use `opponent.glb`. An invisible circular wall keeps everyone inside the arena.
+Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), 30-round mag, hitscan. Hold ADS to look through the sight with zoom. Headshots are lethal. There are **no bots** — every operator who deploys on this server is in the same FFA. Other players use `opponent.glb`. An invisible circular wall keeps everyone inside the arena.
 
 ## Credits
 

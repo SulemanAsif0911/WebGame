@@ -39,8 +39,8 @@ export default function MainMenu({
               <span>DISTRICT</span>
             </h1>
             <p className="tag">
-              One urban killbox. Every operator who opens this address drops into the same
-              arena. Optic carbine. No teams. Last reputation standing.
+              One urban killbox. Every operator who deploys on this address is in the same
+              live arena. No bots. No instances. Optic carbine. Free for all.
             </p>
           </div>
           <div className="callsign">
@@ -98,7 +98,7 @@ export default function MainMenu({
               00amza — Sketchfab — CC BY 4.0
             </p>
             <p>
-              <strong>Operator (third person / hostiles)</strong>
+              <strong>Operator (third person)</strong>
               <br />
               Stavich — Sketchfab — CC BY-NC-ND 4.0
             </p>
@@ -109,8 +109,8 @@ export default function MainMenu({
             </p>
             <p>
               First-person view uses the carbine POV rig. Hold ADS to look through the sight
-              with zoom. Other operators and hostiles use the opponent mesh. Firearms audio
-              is synthesized locally.
+              with zoom. Other operators who deploy share this arena and the opponent mesh.
+              Firearms audio is synthesized locally.
             </p>
             <small>Not affiliated with any publisher. For private network play.</small>
           </div>

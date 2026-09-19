@@ -34,12 +34,11 @@ const MAX_HEALTH = 100;
 const BODY_DAMAGE = 40;
 const HEAD_DAMAGE = 100;
 const MAX_SPEED = 14;
-const PLAYER_RADIUS = 0.55;
-const PLAYER_HEIGHT = 1.85;
-const HEAD_START = 1.42;
-const SHOT_COOLDOWN_MS = 90;
+const PLAYER_RADIUS = 0.72;
+const PLAYER_HEIGHT = 2.05;
+const HEAD_START = 1.38;
+const SHOT_COOLDOWN_MS = 55;
 const RESPAWN_MS = 3200;
-const BOT_COUNT = 5;
 const ARENA_RADIUS = 46;
 
 const SPAWNS = [
@@ -104,16 +103,14 @@ function publicPlayer(p) {
     sprint: p.sprint,
     reload: p.reload,
     shoot: p.shoot,
-    bot: !!p.bot,
   };
 }
 
-function makePlayer(id, name, bot) {
+function makePlayer(id, name) {
   const spawn = pickSpawn(id);
   return {
     id,
     name,
-    bot: !!bot,
     x: spawn.x,
     y: spawn.y,
     z: spawn.z,
@@ -130,7 +127,6 @@ function makePlayer(id, name, bot) {
     lastShot: 0,
     lastInput: now(),
     diedAt: 0,
-    wander: Math.random() * Math.PI * 2,
   };
 }
 
@@ -178,6 +174,9 @@ function applyDamage(attacker, victim, head) {
   if (!attacker.alive || !victim.alive || attacker.id === victim.id) return false;
   const dmg = head ? HEAD_DAMAGE : BODY_DAMAGE;
   victim.health = Math.max(0, victim.health - dmg);
+  const dx = victim.x - attacker.x;
+  const dz = victim.z - attacker.z;
+  const len = Math.hypot(dx, dz) || 1;
   const vSock = sockets.get(victim.id);
   if (vSock) {
     send(vSock, {
@@ -186,8 +185,8 @@ function applyDamage(attacker, victim, head) {
       dmg,
       health: victim.health,
       head,
-      dirx: 0,
-      dirz: 0,
+      dirx: dx / len,
+      dirz: dz / len,
     });
   }
   const aSock = sockets.get(attacker.id);
@@ -272,17 +271,6 @@ function handleShoot(attacker, origin, dir, targetId, headHint) {
     attacker.id
   );
 
-  if (targetId) {
-    const victim = players.get(Number(targetId));
-    if (victim && victim.alive && victim.id !== attacker.id) {
-      const dist = Math.hypot(victim.x - ox, victim.y + 1.0 - oy, victim.z - oz);
-      if (dist < 95) {
-        applyDamage(attacker, victim, !!headHint);
-        return;
-      }
-    }
-  }
-
   let best = null;
   for (const p of players.values()) {
     if (p.id === attacker.id || !p.alive) continue;
@@ -290,6 +278,19 @@ function handleShoot(attacker, origin, dir, targetId, headHint) {
     if (!hit) continue;
     if (!best || hit.t < best.t) best = { player: p, ...hit };
   }
+
+  if (targetId) {
+    const victim = players.get(Number(targetId));
+    if (victim && victim.alive && victim.id !== attacker.id) {
+      const dist = Math.hypot(victim.x - ox, victim.z - oz);
+      if (dist < 130) {
+        const hintedHead = !!headHint || (best && best.player.id === victim.id && best.head);
+        applyDamage(attacker, victim, hintedHead);
+        return;
+      }
+    }
+  }
+
   if (best) applyDamage(attacker, best.player, best.head);
 }
 
@@ -417,29 +418,7 @@ function attachGame(wss) {
     ws.on('error', () => removePlayer(id));
   });
 
-  for (let i = 0; i < BOT_COUNT; i++) {
-    const id = nextId++;
-    players.set(id, makePlayer(id, 'HOSTILE-' + (i + 1), true));
-  }
-
   setInterval(() => {
-    const dt = TICK_MS / 1000;
-    for (const p of players.values()) {
-      if (!p.bot || !p.alive) continue;
-      if (Math.random() < 0.02) p.wander += (Math.random() - 0.5) * 1.6;
-      p.yaw += (p.wander - p.yaw) * 0.08;
-      const spd = 2.2;
-      p.x += Math.sin(p.yaw) * spd * dt;
-      p.z += Math.cos(p.yaw) * spd * dt;
-      const d = Math.hypot(p.x, p.z);
-      if (d > ARENA_RADIUS - 3) {
-        const s = (ARENA_RADIUS - 3) / d;
-        p.x *= s;
-        p.z *= s;
-        p.yaw += Math.PI * 0.6;
-        p.wander = p.yaw;
-      }
-    }
     if (!sockets.size) return;
     const payload = JSON.stringify({
       t: 'state',
