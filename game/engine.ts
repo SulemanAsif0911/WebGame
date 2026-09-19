@@ -13,10 +13,10 @@ import type { GameSettings } from './settings';
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-const MAG_SIZE = 6;
-const RESERVE_MAX = 30;
-const RELOAD_TIME = 4.58;
-const FIRE_INTERVAL = 0.28;
+const MAG_SIZE = 30;
+const RESERVE_MAX = 90;
+const RELOAD_TIME = 2.35;
+const FIRE_INTERVAL = 0.078;
 const WALK = 5.05;
 const SPRINT = 8.35;
 const CROUCH_SPEED = 2.35;
@@ -63,6 +63,7 @@ export type HudState = {
   loadMsg: string;
   ammoFlash: number;
   headshot: boolean;
+  adsBlend: number;
 };
 
 export type EngineHooks = {
@@ -156,6 +157,15 @@ export class ArenaEngine {
   private fpvIdle: THREE.AnimationAction | null = null;
   private fpvFire: THREE.AnimationAction | null = null;
   private muzzleBone: THREE.Object3D | null = null;
+  private lensObj: THREE.Object3D | null = null;
+  private fpvArmMeshes: THREE.Mesh[] = [];
+  private fpvLensMeshes: THREE.Mesh[] = [];
+  private adsBlend = 0;
+  private adsVel = 0;
+  private lookBufX = 0;
+  private lookBufY = 0;
+  private gunPos = new THREE.Vector3();
+  private gunRot = new THREE.Euler(0, 0, 0, 'YXZ');
   private charScale = 1;
   private charOffsetY = 0;
   private arenaCenter = new THREE.Vector3();
@@ -481,14 +491,9 @@ export class ArenaEngine {
 
   private onMouseMove(e: MouseEvent) {
     if (!this.locked || this.paused || !this.alive) return;
-    const ads = this.held('ads');
-    const sens =
-      0.00165 * this.settings.sensitivity * (ads ? this.settings.adsSensitivity : 1);
-    this.yaw -= e.movementX * sens;
-    const inv = this.settings.invertY ? -1 : 1;
-    this.pitch -= e.movementY * sens * inv;
-    this.pitch = Math.max(-1.25, Math.min(1.25, this.pitch));
-    this.sway += e.movementX * 0.00035;
+    this.lookBufX += e.movementX;
+    this.lookBufY += e.movementY;
+    this.sway += e.movementX * 0.00018;
   }
 
   private async boot() {
@@ -505,7 +510,7 @@ export class ArenaEngine {
       this.pushHud(true);
       this.setupMap(mapGltf.scene);
 
-      this.loadMsg = 'Mounting .357 FPV';
+      this.loadMsg = 'Mounting carbine FPV';
       const fpvGltf = await loader.loadAsync('/models/fpv.glb', (e) => {
         if (e.total) this.load = 0.56 + 0.18 * (e.loaded / e.total);
         this.pushHud(true);
@@ -577,6 +582,12 @@ export class ArenaEngine {
   private setupFPV(src: THREE.Object3D, clips: THREE.AnimationClip[]) {
     src.traverse((o) => {
       const mesh = o as THREE.Mesh;
+      const lname = (o.name || '').toLowerCase();
+      if (/lens/i.test(o.name)) {
+        this.lensObj = o;
+        if (mesh.isMesh) this.fpvLensMeshes.push(mesh);
+      }
+      if (/scope/i.test(o.name) && !this.lensObj) this.lensObj = o;
       if (mesh.isMesh) {
         mesh.castShadow = false;
         mesh.frustumCulled = false;
@@ -587,6 +598,13 @@ export class ArenaEngine {
           if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
           m.depthTest = true;
           m.depthWrite = true;
+          const mn = (m.name || '').toLowerCase();
+          if (mn.includes('arm') || lname.includes('armmesh')) this.fpvArmMeshes.push(mesh);
+          if (mn.includes('lens') || lname.includes('lens')) {
+            this.fpvLensMeshes.push(mesh);
+            m.transparent = true;
+            m.depthWrite = false;
+          }
         }
       }
       if (/muzzle/i.test(o.name)) this.muzzleBone = o;
@@ -596,36 +614,45 @@ export class ArenaEngine {
     const box = new THREE.Box3().setFromObject(this.localRoot);
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 0.001);
-    const s = 0.52 / maxDim;
-    src.scale.setScalar(s);
+    src.scale.setScalar(0.7 / maxDim);
     this.localRoot.updateMatrixWorld(true);
     const box2 = new THREE.Box3().setFromObject(this.localRoot);
     const c = box2.getCenter(new THREE.Vector3());
-    src.position.add(new THREE.Vector3(0.11, -0.16, -0.34).sub(c));
+    src.position.add(new THREE.Vector3(0.13, -0.17, -0.38).sub(c));
 
     this.localMixer = new THREE.AnimationMixer(src);
-    const find = (re: RegExp) => clips.find((cl) => re.test(cl.name));
-    const idleClip = find(/idle01/i) || find(/idle/i) || clips[0];
-    const fireClip = find(/@fire/i) || find(/fire/i);
-    const reloadClip = find(/@reload/i) || find(/reload/i);
-    if (idleClip) {
-      this.fpvIdle = this.localMixer.clipAction(idleClip);
+    const namedIdle = clips.find((cl) => /idle01|idle/i.test(cl.name) && !/all/i.test(cl.name));
+    const namedFire = clips.find((cl) => /@fire|fire/i.test(cl.name) && !/all/i.test(cl.name));
+    const namedReload = clips.find((cl) => /@reload|reload/i.test(cl.name) && !/all/i.test(cl.name));
+    if (namedIdle) {
+      this.fpvIdle = this.localMixer.clipAction(namedIdle);
       this.fpvIdle.setLoop(THREE.LoopRepeat, Infinity);
       this.fpvIdle.play();
+    } else if (clips[0]) {
+      this.fpvIdle = this.localMixer.clipAction(clips[0]);
+      this.fpvIdle.paused = true;
+      this.fpvIdle.time = 0.04;
+      this.fpvIdle.play();
     }
-    if (fireClip) {
-      this.fpvFire = this.localMixer.clipAction(fireClip);
+    if (namedFire) {
+      this.fpvFire = this.localMixer.clipAction(namedFire);
       this.fpvFire.setLoop(THREE.LoopOnce, 1);
       this.fpvFire.clampWhenFinished = true;
     }
-    if (reloadClip) {
-      this.localReload = this.localMixer.clipAction(reloadClip);
+    if (namedReload) {
+      this.localReload = this.localMixer.clipAction(namedReload);
       this.localReload.setLoop(THREE.LoopOnce, 1);
       this.localReload.clampWhenFinished = true;
+      this.localReload.timeScale = Math.max(0.85, namedReload.duration / RELOAD_TIME);
     }
     this.localMixer.addEventListener('finished', (e) => {
       if (e.action === this.fpvFire || e.action === this.localReload) {
-        this.fpvIdle?.reset().fadeIn(0.12).play();
+        if (this.fpvIdle) {
+          this.fpvIdle.paused = true;
+          this.fpvIdle.time = 0.04;
+          this.fpvIdle.enabled = true;
+          this.fpvIdle.fadeIn(0.1).play();
+        }
       }
     });
   }
@@ -982,8 +1009,9 @@ export class ArenaEngine {
     }
     this.mag -= 1;
     this.fireCd = FIRE_INTERVAL;
-    this.recoil += 0.028;
-    this.pitch += 0.012;
+    const adsKick = THREE.MathUtils.lerp(1, 0.38, this.adsBlend);
+    this.recoil += 0.02 * adsKick;
+    this.pitch += 0.008 * adsKick;
     this.audio.gunshot(0);
     this.muzzleLight.intensity = 18;
     if (this.fpvFire) {
@@ -1094,9 +1122,13 @@ export class ArenaEngine {
       if (this.reloadT <= 0) this.finishReload();
     }
 
-    this.ads = this.alive && !this.paused && this.held('ads');
-    const targetFov = this.ads ? this.settings.fov * 0.62 : this.settings.fov;
-    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 10);
+    this.ads = this.alive && !this.paused && this.held('ads') && !this.reloading;
+    this.applyLook(dt);
+    this.stepAds(dt);
+    const adsT = this.smooth01(this.adsBlend);
+    const targetFov = THREE.MathUtils.lerp(this.settings.fov, 28, adsT);
+    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 18);
+    this.camera.near = THREE.MathUtils.lerp(0.045, 0.018, adsT);
     this.camera.updateProjectionMatrix();
 
     if (this.alive && !this.paused) this.move(dt);
@@ -1240,24 +1272,108 @@ export class ArenaEngine {
     }
   }
 
-  private updateCamera(_dt: number) {
+  private applyLook(dt: number) {
+    if (!this.locked || this.paused || !this.alive) {
+      this.lookBufX = 0;
+      this.lookBufY = 0;
+      return;
+    }
+    const adsT = this.smooth01(this.adsBlend);
+    const adsMul = THREE.MathUtils.lerp(1, this.settings.adsSensitivity * 0.42, adsT);
+    const consume = 1 - Math.pow(0.00025, dt);
+    const mx = this.lookBufX * consume;
+    const my = this.lookBufY * consume;
+    this.lookBufX -= mx;
+    this.lookBufY -= my;
+    const sens = 0.00162 * this.settings.sensitivity * adsMul;
+    this.yaw -= mx * sens;
+    const inv = this.settings.invertY ? -1 : 1;
+    this.pitch -= my * sens * inv;
+    this.pitch = Math.max(-1.25, Math.min(1.25, this.pitch));
+  }
+
+  private stepAds(dt: number) {
+    const target = this.ads ? 1 : 0;
+    const omega = 15.2;
+    const x = this.adsBlend - target;
+    const accel = -2 * omega * this.adsVel - omega * omega * x;
+    this.adsVel += accel * dt;
+    this.adsBlend += this.adsVel * dt;
+    if (this.adsBlend < 0) {
+      this.adsBlend = 0;
+      this.adsVel = 0;
+    } else if (this.adsBlend > 1) {
+      this.adsBlend = 1;
+      this.adsVel = 0;
+    } else if (Math.abs(x) < 0.0008 && Math.abs(this.adsVel) < 0.01) {
+      this.adsBlend = target;
+      this.adsVel = 0;
+    }
+  }
+
+  private smooth01(t: number) {
+    const x = THREE.MathUtils.clamp(t, 0, 1);
+    return x * x * (3 - 2 * x);
+  }
+
+  private updateCamera(dt: number) {
+    const adsT = this.smooth01(this.adsBlend);
     const eye = this.crouch ? CROUCH_EYE : STAND_EYE;
-    const bobX = Math.sin(this.bob) * 0.018 * (this.grounded ? 1 : 0);
-    const bobY = Math.abs(Math.cos(this.bob)) * 0.022 * (this.grounded ? 1 : 0);
+    const bobAmt = (this.grounded ? 1 : 0) * (1 - adsT * 0.92);
+    const bobX = Math.sin(this.bob) * 0.018 * bobAmt;
+    const bobY = Math.abs(Math.cos(this.bob)) * 0.022 * bobAmt;
+    const rec = THREE.MathUtils.lerp(1, 0.28, adsT);
     this.camera.position.set(
       this.pos.x + bobX,
-      this.pos.y + eye + bobY - this.recoil * 0.12,
+      this.pos.y + eye + bobY - this.recoil * 0.1 * rec,
       this.pos.z
     );
-    this.camera.rotation.set(this.pitch - this.recoil * 0.55, this.yaw, -this.sway * 0.35, 'YXZ');
+    this.camera.rotation.set(
+      this.pitch - this.recoil * 0.48 * rec,
+      this.yaw,
+      -this.sway * THREE.MathUtils.lerp(0.32, 0.05, adsT),
+      'YXZ'
+    );
     this.camera.updateMatrixWorld(true);
 
-    const adsT = this.ads ? 1 : 0;
-    const gx = THREE.MathUtils.lerp(0.0, -0.04, adsT);
-    const gy = THREE.MathUtils.lerp(0.0, 0.03, adsT);
-    const gz = THREE.MathUtils.lerp(0.0, 0.04, adsT);
-    this.localRoot.position.set(gx + this.sway * 0.4, gy + bobY * 0.6, gz);
-    this.localRoot.rotation.set(-this.recoil * 0.25, this.sway * 0.15, -this.sway * 0.2);
+    const hip = new THREE.Vector3(this.sway * 0.35, bobY * 0.55, 0);
+    const hipRotX = -this.recoil * 0.22;
+    const hipRotY = this.sway * 0.12;
+    const hipRotZ = -this.sway * 0.18;
+
+    this.localRoot.position.copy(hip);
+    this.localRoot.rotation.set(hipRotX, hipRotY, hipRotZ);
+    this.localRoot.updateMatrixWorld(true);
+
+    const adsPos = hip.clone();
+    let adsRotX = -this.recoil * 0.06;
+    let adsRotY = 0;
+    let adsRotZ = 0;
+    if (this.lensObj) {
+      this.lensObj.getWorldPosition(this.tmp);
+      this.camera.worldToLocal(this.tmp);
+      adsPos.x += -this.tmp.x;
+      adsPos.y += -this.tmp.y;
+      adsPos.z += -0.032 - this.tmp.z;
+    } else {
+      adsPos.set(-0.01, 0.035, 0.09);
+    }
+
+    const desired = hip.clone().lerp(adsPos, adsT);
+    const follow = 1 - Math.pow(0.00002, dt);
+    this.gunPos.lerp(desired, follow);
+    this.localRoot.position.copy(this.gunPos);
+    this.localRoot.rotation.set(
+      THREE.MathUtils.lerp(hipRotX, adsRotX, adsT),
+      THREE.MathUtils.lerp(hipRotY, adsRotY, adsT),
+      THREE.MathUtils.lerp(hipRotZ, adsRotZ, adsT)
+    );
+
+    const hideLens = adsT > 0.62;
+    const hideArms = adsT > 0.48;
+    for (const m of this.fpvLensMeshes) m.visible = !hideLens;
+    for (const m of this.fpvArmMeshes) m.visible = !hideArms;
+
     if (!this.alive && this.killedBy) this.camera.position.y += 0.4;
   }
 
@@ -1377,6 +1493,7 @@ export class ArenaEngine {
       loadMsg: this.loadMsg,
       ammoFlash: this.ammoFlash,
       headshot: this.headshotFx,
+      adsBlend: this.adsBlend,
     });
   }
 

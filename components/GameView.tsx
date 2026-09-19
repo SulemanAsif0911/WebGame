@@ -7,8 +7,8 @@ import SettingsPanel, { CrosshairSVG } from './SettingsPanel';
 
 const EMPTY: HudState = {
   health: 100,
-  mag: 6,
-  reserve: 30,
+  mag: 30,
+  reserve: 90,
   reloading: false,
   ads: false,
   sprint: false,
@@ -30,6 +30,7 @@ const EMPTY: HudState = {
   loadMsg: 'Booting',
   ammoFlash: 0,
   headshot: false,
+  adsBlend: 0,
 };
 
 export default function GameView({
@@ -103,11 +104,18 @@ export default function GameView({
       />
       <div className="hud">
         <div className="hurt-vignette" style={{ opacity: hud.hurt * 0.85 }} />
-        {!loading && hud.alive && !hud.ads && <CrosshairSVG settings={settings} />}
+        {!loading && hud.alive && hud.adsBlend < 0.38 && <CrosshairSVG settings={settings} />}
+        {hud.alive && hud.adsBlend > 0.02 && (
+          <div className="scope" style={{ opacity: Math.min(1, hud.adsBlend * 1.15) }}>
+            <div className="scope-vignette" />
+            <div className="scope-ring" />
+            <div className="scope-dot" />
+          </div>
+        )}
         <div
           className="hit"
           style={{
-            opacity: hud.hitmarker,
+            opacity: hud.hitmarker * (1 - hud.adsBlend * 0.35),
             borderColor: hud.headshot ? '#ff5a2a' : '#ffffff',
           }}
         />
@@ -134,7 +142,7 @@ export default function GameView({
         </div>
         <div className={`ammo ${hud.reloading || hud.ammoFlash > 0 ? 'reload' : ''}`}>
           <div className="hp-label" style={{ textAlign: 'right' }}>
-            {hud.reloading ? 'RELOADING .357' : '.357 MAGNUM'}
+            {hud.reloading ? 'RELOADING CARBINE' : 'CARBINE · OPTIC'}
           </div>
           <div className="mag">{String(hud.mag).padStart(2, '0')}</div>
           <div className="res">/ {String(hud.reserve).padStart(2, '0')}</div>

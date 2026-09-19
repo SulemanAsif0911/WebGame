@@ -296,6 +296,46 @@ a { color: var(--accent); }
   background: radial-gradient(circle at center, transparent 40%, rgba(160,0,0,0.55) 100%);
   opacity: 0;
 }
+.scope {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.scope-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    circle at 50% 50%,
+    transparent 13.5vmin,
+    rgba(4, 8, 6, 0.18) 16.5vmin,
+    rgba(0, 0, 0, 0.72) 24vmin,
+    rgba(0, 0, 0, 0.92) 38vmin
+  );
+}
+.scope-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28vmin;
+  height: 28vmin;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 2px solid rgba(186, 210, 170, 0.28);
+  box-shadow:
+    0 0 0 3px rgba(0, 0, 0, 0.45),
+    inset 0 0 28px rgba(0, 0, 0, 0.35);
+}
+.scope-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #ff3b2a;
+  box-shadow: 0 0 8px 2px rgba(255, 70, 40, 0.85);
+}
 .board {
   position: absolute;
   left: 50%;

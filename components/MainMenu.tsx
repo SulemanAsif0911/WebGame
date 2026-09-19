@@ -40,7 +40,7 @@ export default function MainMenu({
             </h1>
             <p className="tag">
               One urban killbox. Every operator who opens this address drops into the same
-              arena. FN FAL. No teams. Last reputation standing.
+              arena. Optic carbine. No teams. Last reputation standing.
             </p>
           </div>
           <div className="callsign">
@@ -71,7 +71,7 @@ export default function MainMenu({
         </div>
         <div className="right-col">
           <div className="live-chip">SECTOR ONLINE</div>
-          <div className="live-chip">FN FAL · 7.62</div>
+          <div className="live-chip">CARBINE · OPTIC</div>
         </div>
       </div>
 
@@ -103,13 +103,14 @@ export default function MainMenu({
               Stavich — Sketchfab — CC BY-NC-ND 4.0
             </p>
             <p>
-              <strong>FPV .357 Magnum (arms + revolver)</strong>
+              <strong>FPV carbine with optic (DJMaesen)</strong>
               <br />
-              From SulemanAsif0911/Gun-Models — 357_pov.glb
+              From SulemanAsif0911/Gun-Models — fps_animated_carbine. Sketchfab / DJMaesen.
             </p>
             <p>
-              First-person view uses the POV revolver rig. Other operators and hostiles use
-              the opponent mesh. Firearms audio is synthesized locally.
+              First-person view uses the carbine POV rig. Hold ADS to look through the sight
+              with zoom. Other operators and hostiles use the opponent mesh. Firearms audio
+              is synthesized locally.
             </p>
             <small>Not affiliated with any publisher. For private network play.</small>
           </div>
