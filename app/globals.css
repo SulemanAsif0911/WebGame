@@ -253,6 +253,14 @@ a { color: var(--accent); }
 .ammo .mag { font-family: var(--display); font-size: 64px; line-height: 0.85; }
 .ammo .res { font-family: var(--mono); color: var(--muted); letter-spacing: 0.16em; }
 .ammo.reload .mag { color: var(--accent-2); }
+.reload-track {
+  margin-top: 8px;
+  margin-left: auto;
+  width: 160px;
+  height: 4px;
+  background: rgba(255,255,255,0.12);
+}
+.reload-fill { height: 100%; background: var(--accent); }
 .top-left {
   position: absolute;
   left: 28px;

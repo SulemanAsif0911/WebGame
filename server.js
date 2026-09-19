@@ -28,65 +28,76 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-const TICK_MS = 50;
+const TICK_MS = 66;
 const MAX_PLAYERS = 16;
-const MAX_HEALTH = 100;
-const BODY_DAMAGE = 50;
-const HEAD_DAMAGE = 100;
-const MAX_SPEED = 14;
-const PLAYER_RADIUS = 0.72;
-const PLAYER_HEIGHT = 2.05;
-const HEAD_START = 1.38;
-const SHOT_COOLDOWN_MS = 55;
-const RESPAWN_MS = 3200;
-const ARENA_RADIUS = 46;
+const MAX_HP = 100;
+const BODY_DMG = 50;
+const HEAD_DMG = 100;
+const RESPAWN_MS = 2800;
+const SHOT_WINDOW_MS = 1000;
+const SHOT_LIMIT = 28;
 
 const SPAWNS = [
-  [18.5, 4, 16.0],
-  [-16.2, 4, 14.8],
-  [14.0, 4, -18.4],
-  [-18.8, 4, -12.6],
-  [4.2, 4, 22.0],
-  [-6.4, 4, -21.5],
-  [22.5, 4, 2.4],
-  [-21.0, 4, 4.8],
-  [8.6, 4, -8.2],
-  [-10.4, 4, 8.8],
+  [16, 14],
+  [-15, 13],
+  [13, -16],
+  [-17, -12],
+  [2, 20],
+  [-4, -19],
+  [20, 3],
+  [-19, 5],
+  [9, -7],
+  [-11, 8],
 ];
 
 let nextId = 1;
 const players = new Map();
-const sockets = new Map();
 
 function now() {
   return Date.now();
 }
 
-function clamp(v, a, b) {
-  return Math.max(a, Math.min(b, v));
+function finite(v) {
+  return typeof v === 'number' && Number.isFinite(v);
 }
 
-function pickSpawn(exceptId) {
+function sanitizeName(raw) {
+  return String(raw || '')
+    .replace(/[^\w\s\-_.]/g, '')
+    .trim()
+    .slice(0, 16);
+}
+
+function uniqueName(base) {
+  const taken = new Set([...players.values()].map((p) => p.name.toLowerCase()));
+  const root = base || 'OPERATOR';
+  if (!taken.has(root.toLowerCase())) return root;
+  for (let i = 2; i < 99; i++) {
+    const cand = `${root}-${i}`;
+    if (!taken.has(cand.toLowerCase())) return cand;
+  }
+  return `${root}-${Date.now() % 1000}`;
+}
+
+function pickSpawn() {
   let best = SPAWNS[0];
-  let bestScore = -Infinity;
+  let bestScore = -1;
   for (const s of SPAWNS) {
-    let minD = Infinity;
-    for (const p of players.values()) {
-      if (p.id === exceptId || !p.alive) continue;
-      const dx = p.x - s[0];
-      const dz = p.z - s[2];
-      minD = Math.min(minD, Math.hypot(dx, dz));
+    let minD = 999;
+    for (const q of players.values()) {
+      if (!q.alive) continue;
+      minD = Math.min(minD, Math.hypot(q.x - s[0], q.z - s[1]));
     }
-    const score = minD === Infinity ? 1000 + Math.random() : minD + Math.random() * 2;
+    const score = minD + Math.random() * 4;
     if (score > bestScore) {
       bestScore = score;
       best = s;
     }
   }
-  return { x: best[0], y: best[1], z: best[2] };
+  return [best[0] + (Math.random() * 2 - 1), best[1] + (Math.random() * 2 - 1)];
 }
 
-function publicPlayer(p) {
+function meta(p) {
   return {
     id: p.id,
     name: p.name,
@@ -95,226 +106,128 @@ function publicPlayer(p) {
     z: p.z,
     yaw: p.yaw,
     pitch: p.pitch,
-    health: p.health,
+    hp: Math.round(p.hp),
+    alive: p.alive,
     kills: p.kills,
     deaths: p.deaths,
-    alive: p.alive,
-    crouch: p.crouch,
-    sprint: p.sprint,
-    reload: p.reload,
-    shoot: p.shoot,
   };
 }
 
-function makePlayer(id, name) {
-  const spawn = pickSpawn(id);
-  return {
-    id,
-    name,
-    x: spawn.x,
-    y: spawn.y,
-    z: spawn.z,
-    yaw: Math.random() * Math.PI * 2,
-    pitch: 0,
-    health: MAX_HEALTH,
-    kills: 0,
-    deaths: 0,
-    alive: true,
-    crouch: false,
-    sprint: false,
-    reload: false,
-    shoot: 0,
-    lastShot: 0,
-    lastInput: now(),
-    diedAt: 0,
-  };
+function send(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-function shotHitsPlayer(ox, oy, oz, dx, dy, dz, p) {
-  const len = Math.hypot(dx, dy, dz) || 1;
-  dx /= len;
-  dy /= len;
-  dz /= len;
-  const chestY = p.y + (p.crouch ? 0.72 : 1.08);
-  const vx = p.x - ox;
-  const vy = chestY - oy;
-  const vz = p.z - oz;
-  const dist = Math.hypot(vx, vy, vz);
-  if (dist < 0.25 || dist > 150) return null;
-  const dot = (dx * vx + dy * vy + dz * vz) / dist;
-  if (dot < 0.72) return null;
-  const radial = Math.sqrt(Math.max(0, 1 - dot * dot)) * dist;
-  const maxRadial = 1.35 + dist * 0.025;
-  if (radial > maxRadial) return null;
-  const hitY = oy + dy * dist;
-  return { t: dist, head: hitY >= p.y + (p.crouch ? 1.05 : HEAD_START) };
+function broadcast(obj, exceptId) {
+  const s = JSON.stringify(obj);
+  for (const p of players.values()) {
+    if (p.id === exceptId) continue;
+    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(s);
+  }
 }
 
-function applyDamage(attacker, victim, head) {
-  if (!attacker.alive || !victim.alive || attacker.id === victim.id) return false;
-  const dmg = head ? HEAD_DAMAGE : BODY_DAMAGE;
-  victim.health = Math.max(0, victim.health - dmg);
-  const dx = victim.x - attacker.x;
-  const dz = victim.z - attacker.z;
-  const len = Math.hypot(dx, dz) || 1;
-  const vSock = sockets.get(victim.id);
-  if (vSock) {
-    send(vSock, {
-      t: 'hurt',
-      by: attacker.id,
-      dmg,
-      health: victim.health,
-      head,
-      dirx: dx / len,
-      dirz: dz / len,
-    });
+function broadcastAll(obj) {
+  const s = JSON.stringify(obj);
+  for (const p of players.values()) {
+    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(s);
   }
-  const aSock = sockets.get(attacker.id);
-  if (aSock) {
-    send(aSock, {
-      t: 'confirm',
-      target: victim.id,
-      dmg,
-      health: victim.health,
-      head,
-      kill: victim.health <= 0,
-    });
-  }
-  broadcast({
-    t: 'hitfx',
-    x: victim.x,
-    y: victim.y + (head ? 1.6 : 1.1),
-    z: victim.z,
-    head,
-    id: victim.id,
-    health: victim.health,
-  });
-  if (victim.health <= 0) {
-    victim.alive = false;
-    victim.deaths += 1;
-    attacker.kills += 1;
-    victim.diedAt = now();
-    broadcast({
-      t: 'kill',
-      id: victim.id,
-      by: attacker.id,
-      name: victim.name,
-      killer: attacker.name,
-      head,
-      kills: attacker.kills,
-      deaths: victim.deaths,
-    });
-    setTimeout(() => respawn(victim.id), RESPAWN_MS);
-  }
+}
+
+function rateOK(p) {
+  const t = now();
+  p.shots = p.shots.filter((x) => t - x < SHOT_WINDOW_MS);
+  if (p.shots.length >= SHOT_LIMIT) return false;
+  p.shots.push(t);
   return true;
 }
 
-function send(ws, msg) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
+function applyDamage(victim, dmg, from, head) {
+  if (!victim.alive || dmg <= 0) return;
+  victim.hp = Math.max(0, victim.hp - dmg);
+  if (victim.hp > 0) {
+    broadcastAll({
+      t: 'hp',
+      id: victim.id,
+      hp: Math.round(victim.hp),
+      from: from.id,
+      head: !!head,
+    });
+    return;
   }
+  victim.hp = 0;
+  victim.alive = false;
+  victim.deaths += 1;
+  if (from.id !== victim.id) from.kills += 1;
+  broadcastAll({
+    t: 'kill',
+    killer: { id: from.id, name: from.name, kills: from.kills },
+    victim: { id: victim.id, name: victim.name, deaths: victim.deaths },
+    head: !!head,
+  });
+  if (victim.respawnTimer) clearTimeout(victim.respawnTimer);
+  victim.respawnTimer = setTimeout(() => {
+    if (!players.has(victim.id)) return;
+    const spawn = pickSpawn();
+    victim.x = spawn[0];
+    victim.y = 0;
+    victim.z = spawn[1];
+    victim.hp = MAX_HP;
+    victim.alive = true;
+    broadcastAll({ t: 'respawn', id: victim.id, x: spawn[0], z: spawn[1], hp: MAX_HP });
+  }, RESPAWN_MS);
 }
 
-function broadcast(msg, exceptId) {
-  const data = JSON.stringify(msg);
-  for (const [id, ws] of sockets) {
-    if (id === exceptId) continue;
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+function completeJoin(ws, msg) {
+  if (players.size >= MAX_PLAYERS) {
+    send(ws, { t: 'full' });
+    ws.close();
+    return null;
   }
-}
-
-function handleShoot(attacker, origin, dir, targetId, headHint) {
-  if (!attacker.alive) return;
-  const tnow = now();
-  if (tnow - attacker.lastShot < SHOT_COOLDOWN_MS) return;
-  attacker.lastShot = tnow;
-  attacker.shoot = tnow;
-
-  const ox = origin.x;
-  const oy = origin.y;
-  const oz = origin.z;
-  const dx = dir.x;
-  const dy = dir.y;
-  const dz = dir.z;
-
-  broadcast(
-    {
-      t: 'shot',
-      id: attacker.id,
-      ox,
-      oy,
-      oz,
-      dx,
-      dy,
-      dz,
-    },
-    attacker.id
-  );
-
-  let best = null;
-  for (const p of players.values()) {
-    if (p.id === attacker.id || !p.alive) continue;
-    const hit = rayHitsAabb(ox, oy, oz, dx, dy, dz, p.x, p.y, p.z, p.crouch);
-    if (!hit) continue;
-    if (!best || hit.t < best.t) best = { player: p, ...hit };
-  }
-
-  if (targetId) {
-    const victim = players.get(Number(targetId));
-    if (victim && victim.alive && victim.id !== attacker.id) {
-      const dist = Math.hypot(victim.x - ox, victim.z - oz);
-      if (dist < 130) {
-        const hintedHead = !!headHint || (best && best.player.id === victim.id && best.head);
-        applyDamage(attacker, victim, hintedHead);
-        return;
-      }
-    }
-  }
-
-  if (best) applyDamage(attacker, best.player, best.head);
-}
-
-function respawn(id) {
-  const p = players.get(id);
-  if (!p) return;
-  const s = pickSpawn(id);
-  p.x = s.x;
-  p.y = s.y;
-  p.z = s.z;
-  p.health = MAX_HEALTH;
-  p.alive = true;
-  p.diedAt = 0;
-  broadcast({ t: 'spawn', id: p.id, x: p.x, y: p.y, z: p.z, health: p.health });
-}
-
-function removePlayer(id) {
-  if (!players.has(id)) return;
-  const p = players.get(id);
-  players.delete(id);
-  sockets.delete(id);
-  broadcast({ t: 'leave', id, name: p.name });
+  const id = nextId++;
+  const name = uniqueName(sanitizeName(msg.name) || `OP-${id}`);
+  const spawn = pickSpawn();
+  const p = {
+    id,
+    ws,
+    name,
+    x: spawn[0],
+    y: 2,
+    z: spawn[1],
+    yaw: 0,
+    pitch: 0,
+    hp: MAX_HP,
+    alive: true,
+    kills: 0,
+    deaths: 0,
+    lastState: 0,
+    shots: [],
+    respawnTimer: null,
+  };
+  players.set(id, p);
+  send(ws, {
+    t: 'welcome',
+    id,
+    name,
+    spawn,
+    you: meta(p),
+    players: [...players.values()].filter((q) => q.id !== id).map(meta),
+  });
+  broadcast({ t: 'join', player: meta(p) }, id);
+  console.log(`[iron-district] ${name} deployed · ${players.size} online`);
+  return p;
 }
 
 function attachGame(wss) {
   wss.on('connection', (ws) => {
-    if (sockets.size >= MAX_PLAYERS) {
-      send(ws, { t: 'full' });
-      ws.close();
-      return;
-    }
-
-    const id = nextId++;
-    const player = makePlayer(id, 'Operator-' + id);
-    players.set(id, player);
-    sockets.set(id, ws);
-
-    send(ws, {
-      t: 'welcome',
-      id,
-      you: publicPlayer(player),
-      players: [...players.values()].map(publicPlayer),
-    });
-    broadcast({ t: 'join', player: publicPlayer(player) }, id);
+    let player = null;
+    const joinTimeout = setTimeout(() => {
+      if (!player) {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 12000);
 
     ws.on('message', (raw) => {
       let msg;
@@ -323,62 +236,55 @@ function attachGame(wss) {
       } catch {
         return;
       }
-      const p = players.get(id);
-      if (!p) return;
+      if (!msg || typeof msg.t !== 'string') return;
 
-      if (msg.t === 'hello') {
-        const name = String(msg.name || '')
-          .replace(/[^\w\s\-_.]/g, '')
-          .trim()
-          .slice(0, 16);
-        p.name = name || p.name;
-        broadcast({ t: 'rename', id, name: p.name });
+      if (!player) {
+        if (msg.t === 'join' || msg.t === 'hello') {
+          player = completeJoin(ws, msg);
+          clearTimeout(joinTimeout);
+        }
         return;
       }
 
-      if (msg.t === 'input') {
-        const tnow = now();
-        const dt = Math.min(0.25, (tnow - p.lastInput) / 1000);
-        p.lastInput = tnow;
+      const p = player;
+
+      if (msg.t === 'state' || msg.t === 'input') {
+        const t = now();
+        if (t - p.lastState < 20) return;
+        p.lastState = t;
         if (!p.alive) return;
-
-        const nx = Number(msg.x);
-        const ny = Number(msg.y);
-        const nz = Number(msg.z);
-        if (![nx, ny, nz].every(Number.isFinite)) return;
-
-        const dist = Math.hypot(nx - p.x, nz - p.z);
-        const maxStep = MAX_SPEED * Math.max(dt, 0.05) + 1.4;
-        if (dist > maxStep * 6) {
-          send(ws, { t: 'correct', x: p.x, y: p.y, z: p.z });
-          return;
-        }
-        p.x = nx;
-        p.y = clamp(ny, -8, 40);
-        p.z = nz;
-        p.yaw = Number(msg.yaw) || 0;
-        p.pitch = clamp(Number(msg.pitch) || 0, -1.4, 1.4);
-        p.crouch = !!msg.crouch;
-        p.sprint = !!msg.sprint;
-        p.reload = !!msg.reload;
+        if (finite(msg.x)) p.x = msg.x;
+        if (finite(msg.y)) p.y = msg.y;
+        if (finite(msg.z)) p.z = msg.z;
+        if (finite(msg.yaw)) p.yaw = msg.yaw;
+        if (finite(msg.pitch)) p.pitch = msg.pitch;
         return;
       }
 
       if (msg.t === 'shoot') {
-        const ox = Number(msg.ox);
-        const oy = Number(msg.oy);
-        const oz = Number(msg.oz);
-        const dx = Number(msg.dx);
-        const dy = Number(msg.dy);
-        const dz = Number(msg.dz);
-        if (![ox, oy, oz, dx, dy, dz].every(Number.isFinite)) return;
-        handleShoot(
-          p,
-          { x: ox, y: oy, z: oz },
-          { x: dx, y: dy, z: dz },
-          msg.target,
-          msg.head
+        if (!p.alive || !rateOK(p)) return;
+        broadcast(
+          {
+            t: 'shoot',
+            id: p.id,
+            o: [msg.ox, msg.oy, msg.oz],
+            d: [msg.dx, msg.dy, msg.dz],
+          },
+          p.id
         );
+        return;
+      }
+
+      if (msg.t === 'hit') {
+        if (!p.alive) return;
+        const target = players.get(Number(msg.target));
+        if (!target || !target.alive || target.id === p.id) return;
+        const dist = Math.hypot(target.x - p.x, target.z - p.z);
+        if (dist > 160) return;
+        const head = msg.head === true;
+        const cap = head ? HEAD_DMG : BODY_DMG;
+        const dmg = Math.min(finite(msg.dmg) ? msg.dmg : cap, cap);
+        applyDamage(target, dmg, p, head);
         return;
       }
 
@@ -387,19 +293,33 @@ function attachGame(wss) {
       }
     });
 
-    ws.on('close', () => removePlayer(id));
-    ws.on('error', () => removePlayer(id));
+    ws.on('close', () => {
+      clearTimeout(joinTimeout);
+      if (!player) return;
+      if (player.respawnTimer) clearTimeout(player.respawnTimer);
+      players.delete(player.id);
+      broadcastAll({ t: 'leave', id: player.id, name: player.name });
+      console.log(`[iron-district] ${player.name} left · ${players.size} online`);
+    });
+    ws.on('error', () => {});
   });
 
   setInterval(() => {
-    if (!sockets.size) return;
-    const payload = JSON.stringify({
-      t: 'state',
-      players: [...players.values()].map(publicPlayer),
-    });
-    for (const ws of sockets.values()) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
-    }
+    if (!players.size) return;
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const payload = [...players.values()].map((p) => [
+      p.id,
+      r2(p.x),
+      r2(p.y),
+      r2(p.z),
+      r2(p.yaw),
+      r2(p.pitch),
+      Math.round(p.hp),
+      p.alive ? 1 : 0,
+      p.kills,
+      p.deaths,
+    ]);
+    broadcastAll({ t: 'snap', p: payload });
   }, TICK_MS);
 }
 
@@ -427,5 +347,6 @@ app.prepare().then(() => {
     const shown = hostname === '0.0.0.0' ? 'localhost' : hostname;
     console.log(`[iron-district] ${dev ? 'dev' : 'prod'} http://${shown}:${port}`);
     console.log(`[iron-district] LAN bind ${hostname}:${port}  ·  websocket /ws`);
+    console.log(`[iron-district] every Deploy joins THIS arena — no bots`);
   });
 });

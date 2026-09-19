@@ -31,6 +31,7 @@ const EMPTY: HudState = {
   ammoFlash: 0,
   headshot: false,
   adsBlend: 0,
+  reloadProg: 0,
 };
 
 export default function GameView({
@@ -146,6 +147,11 @@ export default function GameView({
           </div>
           <div className="mag">{String(hud.mag).padStart(2, '0')}</div>
           <div className="res">/ {String(hud.reserve).padStart(2, '0')}</div>
+          {hud.reloading && (
+            <div className="reload-track">
+              <div className="reload-fill" style={{ width: `${Math.round(hud.reloadProg * 100)}%` }} />
+            </div>
+          )}
         </div>
         {board && !paused && (
           <div className="board">

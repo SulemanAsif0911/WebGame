@@ -8,6 +8,8 @@ import {
 } from 'three-mesh-bvh';
 import { GameAudio } from './audio';
 import type { GameSettings } from './settings';
+import { buildOperator, type OperatorRig } from './operator';
+import { GunMotion } from './motion';
 
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
 (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
@@ -64,6 +66,7 @@ export type HudState = {
   ammoFlash: number;
   headshot: boolean;
   adsBlend: number;
+  reloadProg: number;
 };
 
 export type EngineHooks = {
@@ -74,10 +77,7 @@ export type EngineHooks = {
 type RemoteVis = {
   id: number;
   root: THREE.Group;
-  mixer: THREE.AnimationMixer;
-  reload: THREE.AnimationAction;
-  name: THREE.Sprite;
-  hpFill: THREE.Mesh;
+  rig: OperatorRig;
   x: number;
   y: number;
   z: number;
@@ -89,8 +89,6 @@ type RemoteVis = {
   tyaw: number;
   tpitch: number;
   alive: boolean;
-  reloading: boolean;
-  lastShoot: number;
   health: number;
 };
 
@@ -160,6 +158,12 @@ export class ArenaEngine {
   private lensObj: THREE.Object3D | null = null;
   private fpvArmMeshes: THREE.Mesh[] = [];
   private fpvLensMeshes: THREE.Mesh[] = [];
+  private clipNode: THREE.Object3D | null = null;
+  private boltNode: THREE.Object3D | null = null;
+  private clipHome = new THREE.Vector3();
+  private boltHome = new THREE.Vector3();
+  private gunMotion = new GunMotion();
+  private pendingPlayers: any[] = [];
   private adsBlend = 0;
   private adsVel = 0;
   private lookBufX = 0;
@@ -588,6 +592,8 @@ export class ArenaEngine {
         if (mesh.isMesh) this.fpvLensMeshes.push(mesh);
       }
       if (/scope/i.test(o.name) && !this.lensObj) this.lensObj = o;
+      if (/^clip$/i.test(o.name) || /magazine|mag$/i.test(o.name)) this.clipNode = o;
+      if (/^bolt$/i.test(o.name) || /charging/i.test(o.name)) this.boltNode = o;
       if (mesh.isMesh) {
         mesh.castShadow = false;
         mesh.frustumCulled = false;
@@ -620,6 +626,8 @@ export class ArenaEngine {
     const box2 = new THREE.Box3().setFromObject(this.localRoot);
     const c = box2.getCenter(new THREE.Vector3());
     src.position.add(new THREE.Vector3(0.18, -0.24, -0.36).sub(c));
+    if (this.clipNode) this.clipHome.copy(this.clipNode.position);
+    if (this.boltNode) this.boltHome.copy(this.boltNode.position);
 
     this.localMixer = new THREE.AnimationMixer(src);
     const namedIdle = clips.find((cl) => /idle01|idle/i.test(cl.name) && !/all/i.test(cl.name));
@@ -656,6 +664,15 @@ export class ArenaEngine {
         }
       }
     });
+  }
+
+  private decodePos(x: number, z: number) {
+    const c = this.arenaCenter;
+    const away = Math.hypot(x - c.x, z - c.z);
+    if (away > this.arenaRadius + 8 && Math.hypot(x, z) < 42) {
+      return { x: c.x + x, z: c.z + z };
+    }
+    return { x, z };
   }
 
   private groundAt(x: number, z: number, fromY = 40) {
@@ -704,7 +721,7 @@ export class ArenaEngine {
     this.ws.onopen = () => {
       this.connected = true;
       this.connecting = false;
-      this.ws?.send(JSON.stringify({ t: 'hello', name: this.myName }));
+      this.ws?.send(JSON.stringify({ t: 'join', name: this.myName }));
     };
     this.ws.onclose = () => {
       this.connected = false;
@@ -728,44 +745,29 @@ export class ArenaEngine {
   private onNet(msg: any) {
     if (msg.t === 'welcome') {
       this.myId = msg.id;
-      this.health = msg.you.health;
-      this.alive = msg.you.alive;
-      this.kills = msg.you.kills;
-      this.deaths = msg.you.deaths;
-      if (msg.you.x) {
-        const gy = this.groundAt(msg.you.x, msg.you.z, 40);
-        this.pos.set(msg.you.x, gy + 0.05, msg.you.z);
-      }
-      for (const p of msg.players) {
-        this.upsertScore(p);
-        if (p.id !== this.myId) this.syncRemote(p);
-      }
+      if (msg.name) this.myName = msg.name;
+      this.health = msg.you?.hp ?? msg.you?.health ?? 100;
+      this.alive = msg.you?.alive !== false;
+      this.kills = msg.you?.kills || 0;
+      this.deaths = msg.you?.deaths || 0;
+      this.placeAtSafeSpawn(msg.id || 0);
+      const others = msg.players || [];
+      for (const p of others) this.spawnRemote(p);
       return;
     }
-    if (msg.t === 'state') {
-      const seen = new Set<number>();
-      for (const p of msg.players) {
-        seen.add(p.id);
-        this.upsertScore(p);
-        if (p.id === this.myId) {
-          if (typeof p.health === 'number' && p.alive) this.health = p.health;
-          continue;
-        }
-        this.syncRemote(p);
-      }
-      for (const id of [...this.remotes.keys()]) {
-        if (!seen.has(id)) {
-          const r = this.remotes.get(id);
-          if (r) this.scene.remove(r.root);
-          this.remotes.delete(id);
-          this.scores.delete(id);
-        }
-      }
+    if (msg.t === 'join' && msg.player) {
+      if (msg.player.id !== this.myId) this.spawnRemote(msg.player);
       return;
     }
-    if (msg.t === 'join') {
-      this.upsertScore(msg.player);
-      if (msg.player?.id !== this.myId) this.syncRemote(msg.player);
+    if (msg.t === 'snap' && Array.isArray(msg.p)) {
+      this.applySnap(msg.p);
+      return;
+    }
+    if (msg.t === 'state' && Array.isArray(msg.players)) {
+      for (const p of msg.players) {
+        if (p.id === this.myId) continue;
+        this.spawnRemote(p);
+      }
       return;
     }
     if (msg.t === 'leave') {
@@ -781,31 +783,42 @@ export class ArenaEngine {
       const s = this.scores.get(msg.id);
       if (s) s.name = msg.name;
       const r = this.remotes.get(msg.id);
+      if (r) r.rig.setName(msg.name);
+      return;
+    }
+    if (msg.t === 'shoot' && msg.id !== this.myId) {
+      const r = this.remotes.get(msg.id);
       if (r) {
-        r.root.remove(r.name);
-        r.name = makeLabel(msg.name);
-        r.root.add(r.name);
+        this.audio.gunshot(this.pos.distanceTo(new THREE.Vector3(r.x, r.y, r.z)));
+        const o = msg.o || [msg.ox, msg.oy, msg.oz];
+        const d = msg.d || [msg.dx, msg.dy, msg.dz];
+        if (o && d) this.spawnTracer(new THREE.Vector3(o[0], o[1], o[2]), new THREE.Vector3(d[0], d[1], d[2]));
       }
       return;
     }
-    if (msg.t === 'shot' && msg.id !== this.myId) {
+    if (msg.t === 'hp') {
+      if (msg.id === this.myId) {
+        this.health = msg.hp;
+        this.hurt = 1;
+        this.audio.hurt();
+        if (this.health <= 0) this.onDeath(this.scores.get(msg.from)?.name || 'Operator');
+      }
+      const s = this.scores.get(msg.id);
+      if (s) {
+        s.health = msg.hp;
+        s.alive = msg.hp > 0;
+      }
       const r = this.remotes.get(msg.id);
       if (r) {
-        r.lastShoot = 0.08;
-        this.audio.gunshot(this.pos.distanceTo(new THREE.Vector3(r.x, r.y, r.z)));
-        this.spawnTracer(
-          new THREE.Vector3(msg.ox, msg.oy, msg.oz),
-          new THREE.Vector3(msg.dx, msg.dy, msg.dz)
-        );
+        r.health = msg.hp;
+        r.alive = msg.hp > 0;
       }
       return;
     }
     if (msg.t === 'hurt') {
-      this.health = msg.health;
+      this.health = typeof msg.health === 'number' ? msg.health : this.health;
       this.hurt = 1;
       this.audio.hurt();
-      this.vel.x += (msg.dirx || 0) * 2.2;
-      this.vel.z += (msg.dirz || 0) * 2.2;
       if (this.health <= 0) this.onDeath(this.scores.get(msg.by)?.name || 'Operator');
       return;
     }
@@ -814,13 +827,8 @@ export class ArenaEngine {
       this.headshotFx = !!msg.head;
       this.audio.hit(msg.head);
       if (msg.kill) this.audio.kill();
-      const s = this.scores.get(msg.target);
-      if (s) {
-        s.health = msg.health;
-        s.alive = msg.health > 0;
-      }
       const r = this.remotes.get(msg.target);
-      if (r) {
+      if (r && typeof msg.health === 'number') {
         r.health = msg.health;
         r.alive = msg.health > 0;
         r.root.visible = msg.health > 0;
@@ -828,53 +836,55 @@ export class ArenaEngine {
       return;
     }
     if (msg.t === 'kill') {
-      this.pushFeed(
-        `${msg.killer}  ▸  ${msg.name}${msg.head ? '  · HS' : ''}`,
-        !!msg.head
-      );
-      if (msg.by === this.myId) this.kills = msg.kills;
-      if (msg.id === this.myId) this.deaths = msg.deaths;
-      const s = this.scores.get(msg.by);
-      if (s) s.kills = msg.kills;
-      const v = this.scores.get(msg.id);
-      if (v) {
-        v.deaths = msg.deaths;
-        v.alive = false;
-        v.health = 0;
+      const killer = msg.killer?.name || msg.killer || 'Operator';
+      const victim = msg.victim?.name || msg.name || 'Operator';
+      const kid = msg.killer?.id ?? msg.by;
+      const vid = msg.victim?.id ?? msg.id;
+      this.pushFeed(`${killer}  ▸  ${victim}${msg.head ? '  · HS' : ''}`, !!msg.head);
+      if (kid === this.myId) this.kills = msg.killer?.kills ?? this.kills + 1;
+      if (vid === this.myId) {
+        this.deaths = msg.victim?.deaths ?? this.deaths + 1;
+        if (this.alive) this.onDeath(killer);
       }
-      const dead = this.remotes.get(msg.id);
+      const ks = this.scores.get(kid);
+      if (ks && msg.killer?.kills != null) ks.kills = msg.killer.kills;
+      const vs = this.scores.get(vid);
+      if (vs) {
+        vs.alive = false;
+        vs.health = 0;
+        if (msg.victim?.deaths != null) vs.deaths = msg.victim.deaths;
+      }
+      const dead = this.remotes.get(vid);
       if (dead) {
         dead.alive = false;
         dead.health = 0;
         dead.root.visible = false;
       }
-      if (msg.id === this.myId && this.alive) {
-        this.onDeath(msg.killer || 'Operator');
-      }
       return;
     }
-    if (msg.t === 'spawn') {
-      if (msg.id === this.myId) {
+    if (msg.t === 'respawn' || msg.t === 'spawn') {
+      const id = msg.id;
+      if (id === this.myId) {
         this.alive = true;
-        this.health = 100;
+        this.health = msg.hp ?? 100;
         this.killedBy = null;
-        this.invuln = 1.4;
-        const gy = this.groundAt(msg.x, msg.z, 40);
-        this.pos.set(msg.x, gy + 0.05, msg.z);
-        this.vel.set(0, 0, 0);
+        this.invuln = 0.4;
+        this.placeAtSafeSpawn(id);
         this.mag = MAG_SIZE;
       } else {
-        const r = this.remotes.get(msg.id);
+        const r = this.remotes.get(id);
         if (r) {
           r.alive = true;
           r.health = 100;
           r.root.visible = true;
-          r.tx = msg.x;
-          r.ty = msg.y;
-          r.tz = msg.z;
+          const w = this.decodePos(msg.x || 0, msg.z || 0);
+          r.tx = w.x;
+          r.tz = w.z;
+          const gy = this.groundAt(w.x, w.z, 48);
+          r.ty = Number.isFinite(gy) ? gy : r.ty;
         }
       }
-      const s = this.scores.get(msg.id);
+      const s = this.scores.get(id);
       if (s) {
         s.alive = true;
         s.health = 100;
@@ -885,22 +895,106 @@ export class ArenaEngine {
       this.ping = Math.max(0, Date.now() - msg.n);
       return;
     }
-    if (msg.t === 'hitfx') {
-      this.spark(new THREE.Vector3(msg.x, msg.y, msg.z), msg.head ? 0xffe0e0 : 0xff5533);
-      if (typeof msg.health === 'number' && msg.id) {
-        const s = this.scores.get(msg.id);
-        if (s) {
-          s.health = msg.health;
-          s.alive = msg.health > 0;
-        }
-        const r = this.remotes.get(msg.id);
-        if (r) {
-          r.health = msg.health;
-          r.alive = msg.health > 0;
-          r.root.visible = msg.health > 0;
-        }
+  }
+
+  private applySnap(rows: any[]) {
+    const seen = new Set<number>();
+    for (const n of rows) {
+      const id = n[0];
+      const x = n[1], y = n[2], z = n[3], yaw = n[4], pitch = n[5];
+      const hp = n[6], alive = n[7] === 1, kills = n[8], deaths = n[9];
+      seen.add(id);
+      this.scores.set(id, {
+        id,
+        name: this.scores.get(id)?.name || (id === this.myId ? this.myName : 'Operator'),
+        kills,
+        deaths,
+        health: hp,
+        alive,
+        you: id === this.myId,
+      });
+      if (id === this.myId) {
+        if (alive) this.health = hp;
+        this.kills = kills;
+        this.deaths = deaths;
+        continue;
+      }
+      let r = this.remotes.get(id);
+      if (!r) {
+        this.spawnRemote({ id, name: this.scores.get(id)?.name || 'Operator', x, y, z, yaw, pitch, hp, alive });
+        r = this.remotes.get(id);
+        if (!r) continue;
+      }
+      const w = this.decodePos(x, z);
+      r.tx = w.x;
+      r.tz = w.z;
+      if (typeof y === 'number' && y > 0.05) r.ty = y;
+      else {
+        const gy = this.groundAt(w.x, w.z, 48);
+        if (Number.isFinite(gy)) r.ty = gy;
+      }
+      r.tyaw = yaw;
+      r.tpitch = pitch;
+      r.health = hp;
+      r.alive = alive;
+      r.root.visible = alive;
+    }
+    for (const id of [...this.remotes.keys()]) {
+      if (!seen.has(id)) {
+        const r = this.remotes.get(id);
+        if (r) this.scene.remove(r.root);
+        this.remotes.delete(id);
+        this.scores.delete(id);
       }
     }
+  }
+
+  private spawnRemote(p: any) {
+    if (!p || p.id === this.myId) return;
+    if (this.remotes.has(p.id)) {
+      const r = this.remotes.get(p.id)!;
+      if (p.name) r.rig.setName(p.name);
+      return;
+    }
+    const rig = buildOperator(p.name || 'Operator', 0xd6ff3a);
+    rig.hitMeshes.forEach((m) => {
+      m.userData.pid = p.id;
+    });
+    const root = rig.group;
+    this.scene.add(root);
+    const decoded = this.decodePos(p.x || 0, p.z || 0);
+    const px = decoded.x;
+    const pz = decoded.z;
+    const gy = this.colliders.length ? this.groundAt(px, pz, 48) : p.y || 0;
+    const y = Number.isFinite(gy) ? gy : 0;
+    const r: RemoteVis = {
+      id: p.id,
+      root,
+      rig,
+      x: px,
+      y,
+      z: pz,
+      yaw: p.yaw || 0,
+      pitch: p.pitch || 0,
+      tx: px,
+      ty: y,
+      tz: pz,
+      tyaw: p.yaw || 0,
+      tpitch: p.pitch || 0,
+      alive: p.alive !== false,
+      health: p.hp ?? p.health ?? 100,
+    };
+    root.position.set(r.x, r.y, r.z);
+    root.visible = r.alive;
+    this.remotes.set(p.id, r);
+    this.upsertScore({
+      id: p.id,
+      name: p.name || 'Operator',
+      kills: p.kills || 0,
+      deaths: p.deaths || 0,
+      health: r.health,
+      alive: r.alive,
+    });
   }
 
   private upsertScore(p: any) {
@@ -920,98 +1014,6 @@ export class ArenaEngine {
     this.killfeed = this.killfeed.slice(0, 6);
   }
 
-  private syncRemote(p: any) {
-    if (!this.template) return;
-    let r = this.remotes.get(p.id);
-    if (!r) {
-      const clone = SkeletonUtils.clone(this.template) as THREE.Object3D;
-      clone.scale.setScalar(this.charScale);
-      clone.position.y = this.charOffsetY;
-      clone.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (mesh.isMesh) {
-          mesh.castShadow = this.settings.graphics !== 'low';
-          mesh.frustumCulled = true;
-          mesh.visible = true;
-        }
-      });
-      const root = new THREE.Group();
-      root.add(clone);
-      const mixer = new THREE.AnimationMixer(clone);
-      let reload: THREE.AnimationAction | null = null;
-      if (this.clip) {
-        reload = mixer.clipAction(this.clip);
-        reload.setLoop(THREE.LoopOnce, 1);
-        reload.clampWhenFinished = true;
-        reload.paused = true;
-        reload.time = 0.02;
-        reload.play();
-      }
-      const name = makeLabel(p.name || 'Operator');
-      const hp = makeHpBar();
-      const ghost = new THREE.MeshBasicMaterial({
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        colorWrite: false,
-      });
-      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.88, 3, 6), ghost);
-      body.position.y = 0.92;
-      body.userData.hit = 'body';
-      const skull = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 8), ghost.clone());
-      skull.position.y = 1.64;
-      skull.userData.hit = 'head';
-      root.add(name);
-      root.add(hp.group);
-      root.add(body);
-      root.add(skull);
-      this.scene.add(root);
-      r = {
-        id: p.id,
-        root,
-        mixer,
-        reload: reload!,
-        name,
-        hpFill: hp.fill,
-        x: p.x,
-        y: p.y,
-        z: p.z,
-        yaw: p.yaw,
-        pitch: p.pitch,
-        tx: p.x,
-        ty: p.y,
-        tz: p.z,
-        tyaw: p.yaw,
-        tpitch: p.pitch,
-        alive: p.alive,
-        reloading: false,
-        lastShoot: 0,
-        health: p.health ?? 100,
-      };
-      this.remotes.set(p.id, r);
-    }
-    r.tx = p.x;
-    r.tz = p.z;
-    if (this.colliders.length) {
-      const gy = this.groundAt(p.x, p.z, 48);
-      r.ty = Number.isFinite(gy) ? gy : p.y;
-    } else {
-      r.ty = typeof p.y === 'number' ? p.y : r.ty;
-    }
-    r.tyaw = p.yaw;
-    r.tpitch = p.pitch;
-    r.alive = p.alive;
-    r.health = typeof p.health === 'number' ? p.health : r.health;
-    r.root.visible = p.alive;
-    if (p.reload && r.reload && !r.reloading) {
-      r.reloading = true;
-      r.reload.reset();
-      r.reload.paused = false;
-      r.reload.play();
-    }
-    if (!p.reload) r.reloading = false;
-  }
-
   private onDeath(by: string) {
     this.alive = false;
     this.health = 0;
@@ -1025,13 +1027,50 @@ export class ArenaEngine {
     if (!this.alive || this.reloading || this.mag === MAG_SIZE || this.reserve <= 0) return;
     this.reloading = true;
     this.reloadT = RELOAD_TIME;
+    this.ads = false;
     this.audio.reload();
+    this.gunMotion.startReload(RELOAD_TIME);
     if (this.localReload) {
       this.fpvFire?.stop();
       this.fpvIdle?.fadeOut(0.08);
       this.localReload.reset();
       this.localReload.paused = false;
       this.localReload.fadeIn(0.05).play();
+    }
+  }
+
+  private animateReloadParts() {
+    const p = this.gunMotion.phase();
+    if (this.clipNode) {
+      if (p <= 0) {
+        this.clipNode.position.copy(this.clipHome);
+        this.clipNode.visible = true;
+      } else if (p < 0.28) {
+        const u = p / 0.28;
+        this.clipNode.position.copy(this.clipHome);
+        this.clipNode.position.y -= u * 0.22;
+        this.clipNode.rotation.x = u * 0.8;
+      } else if (p < 0.42) {
+        this.clipNode.visible = false;
+      } else if (p < 0.62) {
+        const u = (p - 0.42) / 0.2;
+        this.clipNode.visible = true;
+        this.clipNode.position.copy(this.clipHome);
+        this.clipNode.position.y -= (1 - u) * 0.22;
+        this.clipNode.rotation.x = (1 - u) * 0.6;
+      } else {
+        this.clipNode.visible = true;
+        this.clipNode.position.copy(this.clipHome);
+        this.clipNode.rotation.x = 0;
+      }
+    }
+    if (this.boltNode) {
+      this.boltNode.position.copy(this.boltHome);
+      if (p > 0.68 && p < 0.9) {
+        const u = (p - 0.68) / 0.22;
+        const kick = Math.sin(u * Math.PI);
+        this.boltNode.position.z += kick * 0.09;
+      }
     }
   }
 
@@ -1042,6 +1081,13 @@ export class ArenaEngine {
     this.reserve -= take;
     this.reloading = false;
     this.reloadT = 0;
+    this.gunMotion.reloading = false;
+    if (this.clipNode) {
+      this.clipNode.visible = true;
+      this.clipNode.position.copy(this.clipHome);
+      this.clipNode.rotation.x = 0;
+    }
+    if (this.boltNode) this.boltNode.position.copy(this.boltHome);
   }
 
   private tryFire() {
@@ -1077,17 +1123,29 @@ export class ArenaEngine {
     const worldHits = this.raycaster.intersectObjects(this.colliders, false);
     if (worldHits[0]) this.spark(worldHits[0].point, 0xffcc77);
 
+    const hitList: THREE.Object3D[] = [];
+    for (const r of this.remotes.values()) {
+      if (r.alive) hitList.push(...r.rig.hitMeshes);
+    }
+    const bodyHits = hitList.length ? this.raycaster.intersectObjects(hitList, false) : [];
+    const wallDist = worldHits[0] ? worldHits[0].distance : 999;
+
     let target: number | null = null;
     let head = false;
     let bestRadial = 1.6;
     let bestDist = 150;
+    if (bodyHits[0] && bodyHits[0].object.userData.pid && bodyHits[0].distance < wallDist + 0.05) {
+      target = bodyHits[0].object.userData.pid;
+      head = !!bodyHits[0].object.userData.isHead;
+      bestDist = bodyHits[0].distance;
+    }
     for (const r of this.remotes.values()) {
       if (!r.alive) continue;
       const cx = r.x - origin.x;
       const cy = r.y + 1.08 - origin.y;
       const cz = r.z - origin.z;
       const dist = Math.hypot(cx, cy, cz);
-      if (dist < 0.3 || dist > 140) continue;
+      if (dist < 0.3 || dist > 140 || dist > wallDist + 0.25) continue;
       const inv = 1 / dist;
       const dot = dir.x * cx * inv + dir.y * cy * inv + dir.z * cz * inv;
       if (dot < 0.78) continue;
@@ -1117,6 +1175,8 @@ export class ArenaEngine {
       }
     }
 
+    this.gunMotion.kick();
+
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(
         JSON.stringify({
@@ -1127,10 +1187,18 @@ export class ArenaEngine {
           dx: dir.x,
           dy: dir.y,
           dz: dir.z,
-          target,
-          head,
         })
       );
+      if (target != null) {
+        this.ws.send(
+          JSON.stringify({
+            t: 'hit',
+            target,
+            dmg: head ? 100 : 50,
+            head,
+          })
+        );
+      }
     }
   }
 
@@ -1194,6 +1262,9 @@ export class ArenaEngine {
     if (this.held('fire') && this.locked && this.alive && !this.paused) this.tryFire();
 
     this.localMixer?.update(dt);
+    this.gunMotion.setWalk(this.grounded && (this.vel.length() > 0.4) ? 1 : 0);
+    this.gunMotion.update(dt);
+    this.animateReloadParts();
     this.localRoot.visible = this.alive;
     this.updateCamera(dt);
     this.updateRemotes(dt);
@@ -1346,6 +1417,7 @@ export class ArenaEngine {
     this.yaw -= mx * sens;
     const inv = this.settings.invertY ? -1 : 1;
     this.pitch -= my * sens * inv;
+    this.gunMotion.sway(mx, my);
     this.pitch = Math.max(-1.25, Math.min(1.25, this.pitch));
   }
 
@@ -1419,11 +1491,11 @@ export class ArenaEngine {
     const desired = hip.clone().lerp(adsPos, adsT);
     const follow = 1 - Math.pow(0.00002, dt);
     this.gunPos.lerp(desired, follow);
-    this.localRoot.position.copy(this.gunPos);
+    this.localRoot.position.copy(this.gunPos).add(this.gunMotion.off);
     this.localRoot.rotation.set(
-      THREE.MathUtils.lerp(hipRotX, adsRotX, adsT),
-      THREE.MathUtils.lerp(hipRotY, adsRotY, adsT),
-      THREE.MathUtils.lerp(hipRotZ, adsRotZ, adsT)
+      THREE.MathUtils.lerp(hipRotX, adsRotX, adsT) + this.gunMotion.rot.x,
+      THREE.MathUtils.lerp(hipRotY, adsRotY, adsT) + this.gunMotion.rot.y,
+      THREE.MathUtils.lerp(hipRotZ, adsRotZ, adsT) + this.gunMotion.rot.z
     );
 
     const hideLens = adsT > 0.62;
@@ -1436,21 +1508,20 @@ export class ArenaEngine {
 
   private updateRemotes(dt: number) {
     for (const r of this.remotes.values()) {
-      r.mixer.update(dt);
-      r.x = THREE.MathUtils.lerp(r.x, r.tx, 1 - Math.pow(0.001, dt));
-      r.y = THREE.MathUtils.lerp(r.y, r.ty, 1 - Math.pow(0.001, dt));
-      r.z = THREE.MathUtils.lerp(r.z, r.tz, 1 - Math.pow(0.001, dt));
-      r.yaw = THREE.MathUtils.lerp(r.yaw, r.tyaw, 1 - Math.pow(0.0008, dt));
+      r.x = THREE.MathUtils.lerp(r.x, r.tx, 1 - Math.pow(0.0008, dt));
+      r.y = THREE.MathUtils.lerp(r.y, r.ty, 1 - Math.pow(0.0008, dt));
+      r.z = THREE.MathUtils.lerp(r.z, r.tz, 1 - Math.pow(0.0008, dt));
+      r.yaw = THREE.MathUtils.lerp(r.yaw, r.tyaw, 1 - Math.pow(0.0005, dt));
       r.root.position.set(r.x, r.y, r.z);
       r.root.rotation.y = r.yaw + Math.PI;
-      r.lastShoot = Math.max(0, r.lastShoot - dt);
-      r.name.quaternion.copy(this.camera.quaternion);
-      const hpParent = r.hpFill.parent;
+      r.root.visible = r.alive;
+      r.rig.nameSpr.quaternion.copy(this.camera.quaternion);
+      const hpParent = r.rig.hpFill.parent;
       if (hpParent) hpParent.quaternion.copy(this.camera.quaternion);
       const hp = Math.max(0, Math.min(1, r.health / 100));
-      r.hpFill.scale.x = Math.max(0.04, hp);
-      r.hpFill.position.x = -0.43 * (1 - hp);
-      (r.hpFill.material as THREE.MeshBasicMaterial).color.setHex(
+      r.rig.hpFill.scale.x = Math.max(0.04, hp);
+      r.rig.hpFill.position.x = -0.42 * (1 - hp);
+      (r.rig.hpFill.material as THREE.MeshBasicMaterial).color.setHex(
         hp > 0.5 ? 0x9dff6a : hp > 0.25 ? 0xffcc33 : 0xff4d3a
       );
     }
@@ -1483,7 +1554,7 @@ export class ArenaEngine {
       this.lastSend = t;
       this.ws.send(
         JSON.stringify({
-          t: 'input',
+          t: 'state',
           x: this.pos.x,
           y: this.pos.y,
           z: this.pos.z,
@@ -1551,6 +1622,7 @@ export class ArenaEngine {
       ammoFlash: this.ammoFlash,
       headshot: this.headshotFx,
       adsBlend: this.adsBlend,
+      reloadProg: this.reloading ? 1 - this.reloadT / RELOAD_TIME : 0,
     });
   }
 
