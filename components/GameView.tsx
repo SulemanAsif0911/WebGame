@@ -6,7 +6,7 @@ import type { GameSettings } from '@/game/settings';
 import SettingsPanel, { CrosshairSVG } from './SettingsPanel';
 
 const EMPTY: HudState = {
-  health: 150,
+  health: 200,
   mag: 30,
   reserve: -1,
   reloading: false,
@@ -32,7 +32,7 @@ const EMPTY: HudState = {
   headshot: false,
   adsBlend: 0,
   reloadProg: 0,
-  maxHealth: 150,
+  maxHealth: 200,
   gunTune: false,
   gunAlign: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
 };

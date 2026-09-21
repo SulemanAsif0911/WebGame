@@ -30,9 +30,9 @@ const handle = app.getRequestHandler();
 
 const TICK_MS = 66;
 const MAX_PLAYERS = 16;
-const MAX_HP = 150;
-const BODY_DMG = 32;
-const HEAD_DMG = 80;
+const MAX_HP = 200;
+const BODY_DMG = 38;
+const HEAD_DMG = 95;
 const RESPAWN_MS = 2800;
 const SHOT_WINDOW_MS = 1000;
 const SHOT_LIMIT = 28;
@@ -151,14 +151,55 @@ function rateOK(p) {
   return true;
 }
 
+function rayHitsPlayer(ox, oy, oz, dx, dy, dz, target) {
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 0.5) return false;
+  dx /= len;
+  dy /= len;
+  dz /= len;
+  const ax = target.x;
+  const az = target.z;
+  const y0 = Number.isFinite(target.y) ? target.y : 0;
+  const ay = y0 + 0.22;
+  const by = y0 + 1.8;
+  const hx = ox - ax;
+  const hz = oz - az;
+  const h2 = dx * dx + dz * dz;
+  let t;
+  if (h2 < 1e-8) t = dy !== 0 ? ((ay + by) * 0.5 - oy) / dy : 0;
+  else t = -(hx * dx + hz * dz) / h2;
+  if (!Number.isFinite(t) || t < 0 || t > 150) return false;
+  const hy = oy + t * dy;
+  if (hy < ay) {
+    t = (ax - ox) * dx + (ay - oy) * dy + (az - oz) * dz;
+  } else if (hy > by) {
+    t = (ax - ox) * dx + (by - oy) * dy + (az - oz) * dz;
+  }
+  if (!Number.isFinite(t) || t < 0 || t > 150) return false;
+  const cx = ox + t * dx;
+  const cy = oy + t * dy;
+  const cz = oz + t * dz;
+  const clampedY = Math.min(by, Math.max(ay, cy));
+  const radial = Math.hypot(cx - ax, cy - clampedY, cz - az);
+  return radial <= 0.52;
+}
+
 function applyDamage(victim, dmg, from, head) {
   if (!victim.alive || dmg <= 0) return;
   victim.hp = Math.max(0, victim.hp - dmg);
+  const hp = Math.round(victim.hp);
+  send(from.ws, {
+    t: 'confirm',
+    target: victim.id,
+    health: hp,
+    head: !!head,
+    kill: hp <= 0,
+  });
   if (victim.hp > 0) {
     broadcastAll({
       t: 'hp',
       id: victim.id,
-      hp: Math.round(victim.hp),
+      hp,
       from: from.id,
       head: !!head,
     });

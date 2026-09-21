@@ -19,9 +19,9 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 const MAG_SIZE = 30;
 const RELOAD_TIME = 2.55;
 const FIRE_INTERVAL = 0.092;
-export const MAX_HP = 150;
-const BODY_DMG = 32;
-const HEAD_DMG = 80;
+export const MAX_HP = 200;
+const BODY_DMG = 38;
+const HEAD_DMG = 95;
 const WALK = 5.05;
 const SPRINT = 8.35;
 const CROUCH_SPEED = 2.35;
@@ -1157,6 +1157,16 @@ export class ArenaEngine {
     if (this.boltNode) this.boltNode.position.copy(this.boltHome);
   }
 
+  private poseShotCamera() {
+    this.applyLook(0);
+    const adsT = this.smooth01(this.adsBlend);
+    const eye = this.crouch ? CROUCH_EYE : STAND_EYE;
+    const rec = THREE.MathUtils.lerp(1, 0.32, adsT);
+    this.camera.position.set(this.pos.x, this.pos.y + eye, this.pos.z);
+    this.camera.rotation.set(this.pitch - this.recoil * 0.42 * rec, this.yaw, 0, 'YXZ');
+    this.camera.updateMatrixWorld(true);
+  }
+
   private tryFire() {
     if (!this.alive || this.paused || this.reloading) return;
     if (this.fireCd > 0) return;
@@ -1165,6 +1175,7 @@ export class ArenaEngine {
       this.startReload();
       return;
     }
+    this.poseShotCamera();
     this.mag -= 1;
     this.fireCd = FIRE_INTERVAL;
     const adsKick = THREE.MathUtils.lerp(1, 0.34, this.adsBlend);
@@ -1187,57 +1198,39 @@ export class ArenaEngine {
       this.fpvFire.fadeIn(0.02).play();
     }
 
-    const origin = this.camera.position.clone();
+    this.camera.updateMatrixWorld(true);
+    const origin = this.camera.getWorldPosition(new THREE.Vector3());
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
-    const spread = THREE.MathUtils.lerp(0.018, 0.0022, this.smooth01(this.adsBlend));
-    dir.x += (Math.random() - 0.5) * spread;
-    dir.y += (Math.random() - 0.5) * spread * 0.7;
-    dir.z += (Math.random() - 0.5) * spread;
     dir.normalize();
     this.spawnTracer(origin, dir);
 
-    this.raycaster.near = 0.2;
+    this.raycaster.near = 0.05;
     this.raycaster.far = 140;
     this.raycaster.set(origin, dir);
     const worldHits = this.raycaster.intersectObjects(this.colliders, false);
     if (worldHits[0]) this.spark(worldHits[0].point, 0xffcc77);
+    const wallDist = worldHits[0] ? worldHits[0].distance : 999;
 
     const hitList: THREE.Object3D[] = [];
     for (const r of this.remotes.values()) {
-      if (r.alive) hitList.push(...r.rig.hitMeshes);
+      if (!r.alive) continue;
+      r.root.updateMatrixWorld(true);
+      hitList.push(...r.rig.hitMeshes);
     }
     const bodyHits = hitList.length ? this.raycaster.intersectObjects(hitList, false) : [];
-    const wallDist = worldHits[0] ? worldHits[0].distance : 999;
 
     let target: number | null = null;
     let head = false;
-    let bestRadial = 1.6;
-    let bestDist = 150;
-    if (bodyHits[0] && bodyHits[0].object.userData.pid && bodyHits[0].distance < wallDist + 0.05) {
-      target = bodyHits[0].object.userData.pid;
-      head = !!bodyHits[0].object.userData.isHead;
-      bestDist = bodyHits[0].distance;
-    }
-    for (const r of this.remotes.values()) {
-      if (!r.alive) continue;
-      const cx = r.x - origin.x;
-      const cy = r.y + 1.08 - origin.y;
-      const cz = r.z - origin.z;
-      const dist = Math.hypot(cx, cy, cz);
-      if (dist < 0.3 || dist > 140 || dist > wallDist + 0.25) continue;
-      const inv = 1 / dist;
-      const dot = dir.x * cx * inv + dir.y * cy * inv + dir.z * cz * inv;
-      if (dot < 0.78) continue;
-      const radial = Math.sqrt(Math.max(0, 1 - dot * dot)) * dist;
-      const limit = 1.25 + dist * 0.02;
-      if (radial > limit) continue;
-      if (radial < bestRadial || (Math.abs(radial - bestRadial) < 0.05 && dist < bestDist)) {
-        bestRadial = radial;
-        bestDist = dist;
-        target = r.id;
-        head = origin.y + dir.y * dist > r.y + 1.38;
-      }
+    let hitPoint: THREE.Vector3 | null = null;
+    for (const hit of bodyHits) {
+      const pid = hit.object.userData.pid;
+      if (!pid) continue;
+      if (hit.distance > wallDist + 0.02) continue;
+      target = pid;
+      head = !!hit.object.userData.isHead;
+      hitPoint = hit.point;
+      break;
     }
 
     if (target != null) {
@@ -1247,7 +1240,7 @@ export class ArenaEngine {
         r.health = Math.max(0, r.health - dmg);
         this.hitmarker = 1;
         this.headshotFx = head;
-        this.spark(new THREE.Vector3(r.x, r.y + (head ? 1.6 : 1.1), r.z), head ? 0xffe0e0 : 0xff5533);
+        this.spark(hitPoint || new THREE.Vector3(r.x, r.y + (head ? 1.6 : 1.1), r.z), head ? 0xffe0e0 : 0xff5533);
         if (r.health <= 0) {
           r.alive = false;
           r.root.visible = false;
@@ -1276,6 +1269,12 @@ export class ArenaEngine {
             target,
             dmg: head ? HEAD_DMG : BODY_DMG,
             head,
+            ox: origin.x,
+            oy: origin.y,
+            oz: origin.z,
+            dx: dir.x,
+            dy: dir.y,
+            dz: dir.z,
           })
         );
       }

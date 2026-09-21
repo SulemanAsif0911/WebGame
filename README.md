@@ -48,7 +48,7 @@ If Windows asks about Node.js firewall access, allow it on **private networks**.
 | Scoreboard | Tab |
 | Pause | Esc |
 
-Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), **30-round mag with infinite reserve**. Hold ADS to look through the sight. **R** plays a mag-drop / seat / bolt reload. **` ** (backtick) opens live gun X/Y/Z alignment. Operators have 150 HP. There are **no bots** — every Deploy joins this FFA. Other players use `opponent.glb`. An invisible circular wall keeps everyone inside the arena. Respawn picks a new ring point each time.
+Weapon: FPV **optic carbine** (`fpv.glb` from Gun-Models / DJMaesen), **30-round mag with infinite reserve**. Hold ADS to look through the sight. **R** plays a mag-drop / seat / bolt reload. **` ** (backtick) opens live gun X/Y/Z alignment. Operators have 200 HP. Hitscan is the crosshair ray only — body or head, no near-miss cone. There are **no bots** — every Deploy joins this FFA. Other players use `opponent.glb`. An invisible circular wall keeps everyone inside the arena. Respawn picks a new ring point each time.
 
 ## Credits
 
